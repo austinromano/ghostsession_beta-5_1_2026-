@@ -1,0 +1,8 @@
+[build]
+builder = "nixpacks"
+buildCommand = "cd apps/server && npm install -g pnpm && pnpm install --frozen-lockfile && pnpm build"
+
+[deploy]
+startCommand = "cd apps/server && npx tsx src/index.ts"
+healthcheckPath = "/api/v1/stats"
+restartPolicyType = "ON_FAILURE"
