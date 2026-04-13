@@ -441,7 +441,27 @@ void GhostSessionEditor::resized()
     }
 
     if (webView)
+    {
         webView->setBounds(area);
+
+        // WebView2 workaround: when hosted inside a DAW plugin frame, the
+        // WebView HWND sometimes doesn't pick up its initial bounds and
+        // leaves a blank area until the user manually resizes the window.
+        // Kick it with a 1px resize shortly after first layout.
+        if (!webViewNudged && area.getWidth() > 1 && area.getHeight() > 1)
+        {
+            webViewNudged = true;
+            juce::Component::SafePointer<juce::Component> safe(webView.get());
+            auto bounds = area;
+            juce::Timer::callAfterDelay(200, [safe, bounds]() {
+                if (safe != nullptr)
+                {
+                    safe->setBounds(bounds.withWidth(bounds.getWidth() - 1));
+                    safe->setBounds(bounds);
+                }
+            });
+        }
+    }
 }
 
 juce::String GhostSessionEditor::getAppUrl() const

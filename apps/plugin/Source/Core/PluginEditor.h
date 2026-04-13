@@ -72,6 +72,7 @@ private:
     std::unique_ptr<GhostWebView> webView;
     DragStrip dragStrip;
     DragOverlay dragOverlay;
+    bool webViewNudged = false;
 
     juce::String getAppUrl() const;
 
