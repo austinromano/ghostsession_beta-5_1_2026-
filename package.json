@@ -2,7 +2,7 @@
   "name": "ghost-session",
   "private": true,
   "scripts": {
-    "build": "pnpm --filter @ghost/types run build && pnpm --filter @ghost/protocol run build && pnpm --filter @ghost/desktop run build && rm -rf apps/server/public/assets && cp -r apps/desktop/dist/assets apps/server/public/assets && cp apps/desktop/dist/index.html apps/server/public/index.html",
+    "build": "pnpm --filter @ghost/types run build && pnpm --filter @ghost/protocol run build && pnpm --filter @ghost/tokens run build && pnpm --filter @ghost/desktop run build && rm -rf apps/server/public/assets && cp -r apps/desktop/dist/assets apps/server/public/assets && cp apps/desktop/dist/index.html apps/server/public/index.html",
     "start": "pnpm run build && cd apps/server && npx tsx src/index.ts"
   },
   "engines": {
