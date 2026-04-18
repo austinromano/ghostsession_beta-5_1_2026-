@@ -101,12 +101,8 @@ export default function PluginLayout() {
     return () => { clearInterval(pollTimer); window.removeEventListener('ghost-refresh-project', handleRefresh); };
   }, [selectedProjectId]);
 
-  // On mount, if the user has existing projects, open the most recent.
-  // New-user case (projects.length === 0) falls through to WelcomeHero.
-  useEffect(() => {
-    if (selectedProjectId || samplePackState.selectedPackId || showSocial) return;
-    if (projects.length > 0) selectProject(projects[0].id);
-  }, [projects.length]);
+  // Always land on WelcomeHero when the plugin opens — user picks a project
+  // from the sidebar or a CTA. No auto-select.
 
   // ── Handlers ──
 
