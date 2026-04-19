@@ -244,8 +244,8 @@ function ProjectListSidebar({
         <Reorder.Item key="projects" value="projects" style={{ listStyle: 'none' }} className="cursor-grab active:cursor-grabbing" whileDrag={{ scale: 1.02, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.4)' }}>
         {/* My Beats dropdown */}
         <div>
-          <div className="h-9 px-3 mx-2 mt-1.5 w-[calc(100%-16px)] flex items-center justify-between rounded-lg glass-subtle cursor-grab active:cursor-grabbing">
-            <span className="text-[13px] font-bold text-white/80 uppercase tracking-[0.08em]">
+          <div className="px-3 pt-4 pb-1.5 flex items-center justify-between cursor-grab active:cursor-grabbing">
+            <span className="text-[11px] font-semibold text-white/40 uppercase tracking-[0.12em]">
               Projects
             </span>
           </div>
@@ -313,8 +313,8 @@ function ProjectListSidebar({
         <Reorder.Item key="favorites" value="favorites" style={{ listStyle: 'none' }} className="cursor-grab active:cursor-grabbing" whileDrag={{ scale: 1.02, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.4)' }}>
         {/* Favorites dropdown */}
         <div>
-          <div className="h-9 px-3 mx-2 mt-1.5 w-[calc(100%-16px)] flex items-center justify-between rounded-lg glass-subtle cursor-grab active:cursor-grabbing">
-            <span className="text-[13px] font-bold text-white/80 uppercase tracking-[0.08em]">
+          <div className="px-3 pt-4 pb-1.5 flex items-center justify-between cursor-grab active:cursor-grabbing">
+            <span className="text-[11px] font-semibold text-white/40 uppercase tracking-[0.12em]">
               Favorites
             </span>
           </div>
