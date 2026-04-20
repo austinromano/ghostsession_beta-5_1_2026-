@@ -11,6 +11,12 @@ export function getAnalyser(): AnalyserNode | null {
   return getAnalyserNode();
 }
 
+// Offsets to apply when a track first lands in the store via
+// loadTrack / loadTrackFromBuffer. Used by the duplicate flow so the new clip
+// arrives at the intended position instead of defaulting to 0 and overlapping
+// the original before the async seeder catches up.
+export const pendingTrackOffsets = new Map<string, number>();
+
 interface AudioState {
   isPlaying: boolean;
   currentTime: number;
@@ -207,12 +213,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
         set((s) => {
           const m = new Map(s.loadedTracks);
           const existing = m.get(trackId);
+          const pending = pendingTrackOffsets.get(trackId);
+          if (pending !== undefined) pendingTrackOffsets.delete(trackId);
           m.set(trackId, {
             id: trackId, buffer: cachedBuf, source: null, gainNode: null,
             volume: existing?.volume ?? 1, muted: existing?.muted ?? false,
             soloed: existing?.soloed ?? false, bpm: trackBpm || existing?.bpm || 0, pitch: existing?.pitch ?? 0,
             trimStart: existing?.trimStart ?? 0, trimEnd: existing?.trimEnd ?? 0,
-            startOffset: existing?.startOffset ?? 0,
+            startOffset: existing?.startOffset ?? pending ?? 0,
           });
           return { loadedTracks: m };
         });
@@ -229,10 +237,12 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
         set((s) => {
           const m = new Map(s.loadedTracks);
+          const pending = pendingTrackOffsets.get(trackId);
+          if (pending !== undefined) pendingTrackOffsets.delete(trackId);
           m.set(trackId, {
             id: trackId, buffer, source: null, gainNode: null,
             volume: 1, muted: false, soloed: false, bpm: trackBpm, pitch: 0,
-            trimStart: 0, trimEnd: 0, startOffset: 0,
+            trimStart: 0, trimEnd: 0, startOffset: pending ?? 0,
           });
           return { loadedTracks: m };
         });
@@ -247,6 +257,8 @@ export const useAudioStore = create<AudioState>((set, get) => {
       set((s) => {
         const m = new Map(s.loadedTracks);
         const existing = m.get(trackId);
+        const pending = pendingTrackOffsets.get(trackId);
+        if (pending !== undefined) pendingTrackOffsets.delete(trackId);
         m.set(trackId, {
           id: trackId, buffer, source: null, gainNode: null,
           volume: existing?.volume ?? 1, muted: existing?.muted ?? false,
@@ -254,7 +266,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           pitch: existing?.pitch ?? 0,
           trimStart: existing?.trimStart ?? 0,
           trimEnd: existing?.trimEnd ?? 0,
-          startOffset: existing?.startOffset ?? 0,
+          startOffset: existing?.startOffset ?? pending ?? 0,
         });
         return { loadedTracks: m };
       });

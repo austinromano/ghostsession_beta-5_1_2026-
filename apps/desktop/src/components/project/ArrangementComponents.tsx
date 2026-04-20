@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { useAudioStore } from '../../stores/audioStore';
+import { useAudioStore, pendingTrackOffsets } from '../../stores/audioStore';
 import { api } from '../../lib/api';
 import { snapToBar } from '../../lib/audio';
 import Waveform from '../tracks/Waveform';
@@ -260,17 +260,29 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
         <button
           onClick={async () => {
             if (!track.fileId) return;
-            // Calculate where the new clip should start — after the last clip in this lane
-            const buffer = useAudioStore.getState().loadedTracks.get(track.id)?.buffer;
-            const clipDuration = buffer?.duration || 0;
-            const newOffset = (clipIndex + 1) * clipDuration;
+            // Drop the copy immediately after *this* clip, snapped to the
+            // nearest bar. Using track.startOffset + duration (instead of a
+            // fixed clipIndex-based offset) means the duplicate lands next
+            // to the clip the user actually clicked, even after the user
+            // has dragged it elsewhere on the grid.
+            const loaded = useAudioStore.getState().loadedTracks.get(track.id);
+            const clipDuration = loaded?.buffer?.duration || 0;
+            const currentOffset = loaded?.startOffset ?? 0;
+            const rawOffset = currentOffset + clipDuration;
+            const projectBpm = useAudioStore.getState().projectBpm || 120;
+            const newOffset = Math.max(0, snapToBar(rawOffset, projectBpm, 'nearest'));
 
             const result = await api.addTrack(selectedProjectId, { name: (track.name || 'Track'), type: track.type || 'audio', fileId: track.fileId, fileName: track.name } as any);
-            // Set the startOffset for the new track so it plays after the original
             if (result?.id) {
-              useAudioStore.getState().setTrackOffset(result.id, newOffset);
+              // Stash the intended offset so the audio store applies it the
+              // moment the new track lands (it otherwise defaults to 0 and
+              // overlaps the original before the async seeder catches up).
+              pendingTrackOffsets.set(result.id, newOffset);
             }
             window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
+            // Ask TransportBar to flush the arrangement immediately so the
+            // new clip's position survives a quick plugin close.
+            window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
           }}
           title="Duplicate"
           className="w-7 h-7 flex items-center justify-center text-white/70 hover:text-white hover:bg-white/10 transition-colors"
