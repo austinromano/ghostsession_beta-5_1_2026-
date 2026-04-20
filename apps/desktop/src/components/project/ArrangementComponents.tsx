@@ -44,20 +44,30 @@ export function ArrangementScrollView({ children }: { children: React.ReactNode;
   return <div className="relative overflow-x-auto" style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(124,58,237,0.3) transparent' }}>{children}</div>;
 }
 
-export function BarRuler() {
+// Shared time axis for the arrangement: at least 16 bars wide, stretches to
+// cover the longest clip. Ruler, clips, and playhead all position against this
+// so they stay aligned regardless of BPM or project length.
+function useArrangement() {
   const projectBpm = useAudioStore((s) => s.projectBpm);
   const duration = useAudioStore((s) => s.duration);
   const bpm = projectBpm > 0 ? projectBpm : 120;
-  const barSec = 240 / bpm; // 4 beats per bar
-  // At least 16 bars so the ruler isn't blank on a fresh project; otherwise
-  // stretch to cover the longest clip.
-  const numBars = Math.max(16, Math.ceil((duration || 0) / barSec));
+  const barSec = 240 / bpm;
+  const minDur = 16 * barSec;
+  const arrangementDur = Math.max(minDur, duration || 0);
+  const numBars = Math.ceil(arrangementDur / barSec);
+  return { bpm, barSec, arrangementDur, numBars };
+}
+
+export function BarRuler() {
+  const { numBars } = useArrangement();
+  // Thin the label density as bar count grows so text doesn't crowd.
+  const step = numBars <= 24 ? 2 : numBars <= 48 ? 4 : numBars <= 96 ? 8 : 16;
 
   return (
     <div className="relative h-[18px] w-full select-none" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
       {Array.from({ length: numBars }).map((_, i) => {
         const leftPct = (i / numBars) * 100;
-        const labeled = i % 2 === 0; // label bars 1, 3, 5, 7…
+        const labeled = i % step === 0;
         return (
           <div key={i} className="absolute top-0 bottom-0 pointer-events-none" style={{ left: `${leftPct}%` }}>
             <div className="absolute top-0 left-0" style={{ width: 1, height: labeled ? 7 : 4, background: 'rgba(255,255,255,0.22)' }} />
@@ -77,12 +87,12 @@ export function BarGridOverlay() { return null; }
 /* ── Playhead across all lanes ── */
 export function ArrangementPlayhead() {
   const currentTime = useAudioStore((s) => s.currentTime);
-  const duration = useAudioStore((s) => s.duration);
   const isPlaying = useAudioStore((s) => s.isPlaying);
   const soloPlayingTrackId = useAudioStore((s) => s.soloPlayingTrackId);
+  const { arrangementDur } = useArrangement();
 
   if ((!isPlaying && currentTime === 0) || soloPlayingTrackId) return null;
-  const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
+  const pct = arrangementDur > 0 ? (currentTime / arrangementDur) * 100 : 0;
 
   return (
     <div
@@ -96,8 +106,20 @@ export function ArrangementPlayhead() {
 function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth, clipIndex, totalClips, members }: {
   track: any; selectedProjectId: string; deleteTrack: any; trackZoom: 'full' | 'half'; laneWidth: number; clipIndex: number; totalClips: number; members: Member[];
 }) {
-  const clipWidth = totalClips > 0 ? 100 / totalClips : 100;
-  const leftPct = clipIndex * clipWidth;
+  const { arrangementDur } = useArrangement();
+  const startOffset = useAudioStore((s) => s.loadedTracks.get(track.id)?.startOffset ?? 0);
+  const clipDur = useAudioStore((s) => s.loadedTracks.get(track.id)?.buffer?.duration ?? 0);
+
+  // Prefer time-axis positioning once the buffer has loaded; fall back to the
+  // legacy side-by-side layout so clips don't collapse to zero width while the
+  // audio is still decoding.
+  const haveTime = clipDur > 0 && arrangementDur > 0;
+  const leftPct = haveTime
+    ? (startOffset / arrangementDur) * 100
+    : clipIndex * (100 / Math.max(1, totalClips));
+  const clipWidth = haveTime
+    ? (clipDur / arrangementDur) * 100
+    : 100 / Math.max(1, totalClips);
   const height = trackZoom === 'half' ? 48 : 70;
   const owner = members.find((m) => m.userId === track.ownerId);
   const ownerName = owner?.displayName || track.ownerName || 'Unknown';
@@ -230,7 +252,6 @@ export function DraggableTrackList({ tracks, selectedProjectId, deleteTrack, upd
           ))}
         </div>
       ))}
-      <ArrangementPlayhead />
     </div>
   );
 }
