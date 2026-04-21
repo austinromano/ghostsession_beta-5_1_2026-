@@ -200,6 +200,7 @@ export default function PluginLayout() {
 
   const selectProject = async (id: string) => {
     if (selectedProjectId) { leave(); audioCleanup(); }
+    closeCommunityRoom();
     if (id === '__beats__') {
       const p = await createProject({ name: 'Untitled', projectType: 'beat' } as any);
       await fetchProjects();
@@ -341,13 +342,14 @@ export default function PluginLayout() {
   type DockMode = 'home' | 'explore' | 'messages' | 'marketplace';
   const goTo = (mode: DockMode) => {
     if (selectedProjectId) { leave(); audioCleanup(); }
+    closeCommunityRoom();
     setSelectedProjectId(null);
     samplePackState.setSelectedPackId(null);
     setShowSocial(mode === 'explore');
     setShowMessages(mode === 'messages');
     setShowMarketplace(mode === 'marketplace');
   };
-  const atHome = !selectedProjectId && !samplePackState.selectedPackId && !showSocial && !showMessages && !showMarketplace;
+  const atHome = !selectedProjectId && !samplePackState.selectedPackId && !showSocial && !showMessages && !showMarketplace && !activeCommunityRoomId;
 
   // ── Render ──
 
@@ -506,7 +508,7 @@ export default function PluginLayout() {
 
             <div className="flex-1 flex min-h-0 gap-2">
               {activeCommunityRoomId ? (
-                <CommunityRoomView onClose={closeCommunityRoom} />
+                <CommunityRoomView />
               ) : selectedProjectId && currentProject ? (
                 <>
                   <div className="flex-1 flex flex-col min-w-0">
