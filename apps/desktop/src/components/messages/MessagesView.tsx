@@ -3,6 +3,7 @@ import Avatar from '../common/Avatar';
 import { useDmStore } from '../../stores/dmStore';
 import { useAuthStore } from '../../stores/authStore';
 import DmAudioBubble from './DmAudioBubble';
+import MessagesCalendar from './MessagesCalendar';
 
 interface Friend {
   id: string;
@@ -345,6 +346,17 @@ export default function MessagesView({ friends }: Props) {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Right column — Calendar (its own section) */}
+      <div className="w-[280px] shrink-0 flex flex-col border-l border-white/[0.06] min-h-0">
+        <div className="px-4 pt-4 pb-3 border-b border-white/[0.06]">
+          <h2 className="text-[15px] font-bold text-white tracking-tight">Calendar</h2>
+          <p className="text-[11px] text-white/40 mt-0.5">Plan sessions together</p>
+        </div>
+        <div className="flex-1 overflow-y-auto min-h-0">
+          <MessagesCalendar />
+        </div>
       </div>
     </div>
   );
