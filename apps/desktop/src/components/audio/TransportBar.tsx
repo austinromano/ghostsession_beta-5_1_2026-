@@ -139,14 +139,20 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
   // our own echo, apply it to the local audio store.
   useEffect(() => {
     if (!serverArrangementJson) return;
-    if (serverArrangementJson === lastAppliedServerRef.current) return;
+    if (serverArrangementJson === lastAppliedServerRef.current) {
+      console.log('[arrangement] live-sync skip — already applied');
+      return;
+    }
     if (serverArrangementJson === lastSentServerRef.current) {
+      console.log('[arrangement] live-sync skip — echo of our own send');
       lastAppliedServerRef.current = serverArrangementJson;
       return;
     }
     try {
       const parsed = JSON.parse(serverArrangementJson);
       if (parsed && Array.isArray(parsed.clips)) {
+        const preview = parsed.clips.map((c: any) => `${c.trackId.slice(0, 8)}@${c.startOffset.toFixed(2)}`);
+        console.log('[arrangement] live-sync APPLYING remote blob', { clips: parsed.clips.length, preview });
         useAudioStore.getState().applyArrangementClips(parsed.clips);
         lastAppliedServerRef.current = serverArrangementJson;
       }
@@ -172,10 +178,15 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       for (const t of tracks) {
         if (t.fileId) fileIdMap.set(t.id, t.fileId);
       }
-      useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
       try {
         const state = useAudioStore.getState().buildArrangementState(fileIdMap);
-        lastSentServerRef.current = JSON.stringify(state);
+        const payload = JSON.stringify(state);
+        // Skip if nothing has changed since the last POST. Otherwise every
+        // server-side project-updated would refetch → new tracks prop ref →
+        // re-run this effect → POST same state back in a loop.
+        if (payload === lastSentServerRef.current) return;
+        useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
+        lastSentServerRef.current = payload;
         console.log('[arrangement] POSTing to server', { projectId, clips: state.clips.length });
         await api.saveArrangement(projectId, state);
         console.log('[arrangement] POST ok');
@@ -206,12 +217,17 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       for (const t of tracks) {
         if (t.fileId) fileIdMap.set(t.id, t.fileId);
       }
-      useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
       try {
         const state = useAudioStore.getState().buildArrangementState(fileIdMap);
+        const payload = JSON.stringify(state);
+        if (payload === lastSentServerRef.current) {
+          console.log('[arrangement] flush skip — state unchanged', { projectId });
+          return;
+        }
+        useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
+        lastSentServerRef.current = payload;
         const offsets = state.clips.map((c: any) => `${c.trackId.slice(0, 6)}@${c.startOffset.toFixed(2)}`);
         console.log('[arrangement] flush POST', { projectId, clips: state.clips.length, offsets });
-        lastSentServerRef.current = JSON.stringify(state);
         api.saveArrangement(projectId, state).then(() => {
           console.log('[arrangement] flush POST ok', { projectId });
         }).catch((err) => {
