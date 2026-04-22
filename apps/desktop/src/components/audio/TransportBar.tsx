@@ -75,8 +75,19 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
     if (!tracks || !projectId) return;
     if (restoredProjectIdRef.current === projectId) return;
     const allLoaded = tracks.every((t: any) => !t.fileId || loadedRef.current.has(t.id));
-    if (!allLoaded) return;
+    if (!allLoaded) {
+      console.log('[arrangement] restore waiting — not all tracks loaded', {
+        total: tracks.length,
+        loaded: loadedRef.current.size,
+      });
+      return;
+    }
     restoredProjectIdRef.current = projectId;
+    console.log('[arrangement] all tracks loaded — running restore', {
+      projectId,
+      serverArrangementJsonPresent: !!serverArrangementJson,
+      serverArrangementJsonBytes: serverArrangementJson?.length ?? 0,
+    });
 
     const fileIdMap = new Map<string, string>();
     for (const t of tracks) {
@@ -87,12 +98,18 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       try {
         const parsed = JSON.parse(serverArrangementJson);
         if (parsed && Array.isArray(parsed.clips)) {
+          console.log('[arrangement] applying server blob', { clips: parsed.clips.length });
           useAudioStore.getState().applyArrangementClips(parsed.clips);
           lastAppliedServerRef.current = serverArrangementJson;
           return;
+        } else {
+          console.warn('[arrangement] server blob malformed', parsed);
         }
-      } catch { /* fall through to localStorage */ }
+      } catch (err) {
+        console.warn('[arrangement] server blob JSON parse failed', err);
+      }
     }
+    console.log('[arrangement] falling back to localStorage restore');
     useAudioStore.getState().restoreArrangementState(projectId, fileIdMap);
   }, [tracks, projectId, serverArrangementJson, useAudioStore.getState().loadedTracks.size]);
 
@@ -124,7 +141,10 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
   const arrangeLoadedTracks = useAudioStore((s) => s.loadedTracks);
   useEffect(() => {
     if (!projectId || !tracks || arrangeLoadedTracks.size === 0) return;
-    if (restoredProjectIdRef.current !== projectId) return;
+    if (restoredProjectIdRef.current !== projectId) {
+      console.log('[arrangement] save blocked — restore not yet run', { projectId });
+      return;
+    }
     const timer = setTimeout(async () => {
       const fileIdMap = new Map<string, string>();
       for (const t of tracks) {
@@ -134,9 +154,11 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       try {
         const state = useAudioStore.getState().buildArrangementState(fileIdMap);
         lastSentServerRef.current = JSON.stringify(state);
+        console.log('[arrangement] POSTing to server', { projectId, clips: state.clips.length });
         await api.saveArrangement(projectId, state);
+        console.log('[arrangement] POST ok');
       } catch (err) {
-        console.error('[TransportBar] saveArrangement server failed', err);
+        console.error('[arrangement] POST FAILED', err);
       }
     }, 500);
     return () => clearTimeout(timer);
