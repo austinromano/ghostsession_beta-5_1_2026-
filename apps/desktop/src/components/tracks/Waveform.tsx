@@ -145,13 +145,18 @@ export default memo(function Waveform({
     const scalePeak = mid * 0.9;
     const scaleRms = mid * 1.7; // amplify RMS — it's always smaller than peak
 
-    // Per-column spectral coloring. Each pixel column gets its own hue from
-    // frequency content, rendered as a 1px-wide vertical bar (halo + body).
+    // Pick a per-clip hue from the Ghost brand palette. Hash a stable id so the
+    // same clip gets the same colour on every client and across reloads.
+    const idKey = trackId || fileId || seed;
+    let hh = 0;
+    for (let i = 0; i < idKey.length; i++) hh = ((hh << 5) - hh + idKey.charCodeAt(i)) | 0;
+    const palette = [270, 165, 300, 220, 190, 330]; // purple, teal, violet, blue, cyan, pink
+    const hue = palette[Math.abs(hh) % palette.length];
+
     for (let x = 0; x < w; x++) {
       const peakTop = peaks[x] * scalePeak;
       if (peakTop < 0.5) continue;
       const rmsTop = Math.min(rms[x] * scaleRms, peakTop);
-      const hue = 270;
       // Crest factor: sine ≈ 1.41, percussive hits 3+. Clamp to 40% boost.
       const sat = 55 + Math.min(35, (crest[x] - 1.4) * 10);
       // Onset energy brightens attacks — caps at +18% lightness.
@@ -164,7 +169,7 @@ export default memo(function Waveform({
 
     ctx.fillStyle = 'rgba(255, 255, 255, 0.06)';
     ctx.fillRect(0, mid - 0.5, w, 1);
-  }, [audioData]);
+  }, [audioData, trackId, fileId, seed]);
 
   useEffect(() => {
     draw();
