@@ -157,6 +157,19 @@ export default function SampleLibrarySection() {
     await deleteFile(f.id);
   };
 
+  const clearAll = async () => {
+    const total = files.length;
+    const folderCount = folders.length;
+    if (total === 0 && folderCount === 0) return;
+    if (!window.confirm(`Delete everything in your Sample Library? This removes ${total} file${total === 1 ? '' : 's'} and ${folderCount} folder${folderCount === 1 ? '' : 's'}.`)) return;
+    setUploading(true);
+    // Delete root-level files first, then folders (their delete endpoint
+    // cascades the files inside).
+    for (const f of files.filter((f) => !f.folderId)) await deleteFile(f.id);
+    for (const folder of folders) await deleteFolder(folder.id);
+    setUploading(false);
+  };
+
   return (
     <div>
       <button
@@ -196,6 +209,15 @@ export default function SampleLibrarySection() {
               >
                 +
               </button>
+              {(folders.length > 0 || files.length > 0) && (
+                <button
+                  title="Clear all samples"
+                  onClick={(e) => { e.stopPropagation(); clearAll(); }}
+                  className="px-1.5 py-0.5 rounded hover:bg-red-500/20 text-white/40 hover:text-red-300"
+                >
+                  🗑
+                </button>
+              )}
             </span>
             <input
               ref={inputRef}
