@@ -12,6 +12,7 @@ import { mkdir, stat, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { parseWavPeaks, getCachedPeaks, setCachedPeaks } from '../lib/peaks.js';
+import { analyseWav } from '../lib/bpm.js';
 
 const UPLOADS_DIR = resolve(import.meta.dirname, '../../uploads');
 
@@ -87,10 +88,19 @@ fileRoutes.post('/upload', async (c) => {
     peaksJson = null;
   }
 
+  // BPM + beat analysis for tempo-aware placement and future time-stretch.
+  let analysis: ReturnType<typeof analyseWav> = null;
+  try { analysis = analyseWav(buffer); } catch (err) { console.warn('[files.upload] bpm analysis failed:', err); }
+
   await db.insert(files).values({
     id: fileId, projectId, uploadedBy: user.id,
     fileName: file.name, fileSize: file.size, mimeType,
-    s3Key, peaks: peaksJson, createdAt: new Date().toISOString(),
+    s3Key, peaks: peaksJson,
+    detectedBpm: analysis?.bpm ?? null,
+    bpmConfidence: analysis?.confidence ?? null,
+    firstBeatOffset: analysis?.firstBeatOffset ?? null,
+    beatsJson: analysis ? JSON.stringify(analysis.beats) : null,
+    createdAt: new Date().toISOString(),
   }).run();
 
   return c.json({ success: true, data: { fileId, fileName: file.name } });

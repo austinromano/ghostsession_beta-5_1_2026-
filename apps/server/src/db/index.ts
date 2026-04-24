@@ -221,6 +221,10 @@ export async function initDatabase() {
       mime_type TEXT NOT NULL,
       s3_key TEXT NOT NULL,
       peaks TEXT,
+      detected_bpm REAL,
+      bpm_confidence REAL,
+      first_beat_offset REAL,
+      beats_json TEXT,
       created_at TEXT NOT NULL
     );
   `);
@@ -239,6 +243,14 @@ export async function initDatabase() {
     `ALTER TABLE projects ADD COLUMN arrangement_json TEXT`,
     `ALTER TABLE community_messages ADD COLUMN audio_file_id TEXT`,
     `ALTER TABLE community_messages ADD COLUMN audio_file_name TEXT`,
+    `ALTER TABLE files ADD COLUMN detected_bpm REAL`,
+    `ALTER TABLE files ADD COLUMN bpm_confidence REAL`,
+    `ALTER TABLE files ADD COLUMN first_beat_offset REAL`,
+    `ALTER TABLE files ADD COLUMN beats_json TEXT`,
+    `ALTER TABLE sample_library_files ADD COLUMN detected_bpm REAL`,
+    `ALTER TABLE sample_library_files ADD COLUMN bpm_confidence REAL`,
+    `ALTER TABLE sample_library_files ADD COLUMN first_beat_offset REAL`,
+    `ALTER TABLE sample_library_files ADD COLUMN beats_json TEXT`,
   ];
   // ADD COLUMN migrations are idempotent by design — "duplicate column" is expected
   // on every boot after the first. Any other error is worth surfacing.

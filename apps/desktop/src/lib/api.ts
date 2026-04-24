@@ -271,6 +271,11 @@ export interface SampleLibraryFile {
   fileSize: number;
   mimeType: string;
   peaks: string | null;
+  // BPM analysis — populated at upload time for WAVs, null otherwise.
+  detectedBpm: number | null;
+  bpmConfidence: number | null;
+  firstBeatOffset: number | null;
+  beats: number[] | null;
   createdAt: string;
 }
 

@@ -297,6 +297,14 @@ function LibraryFileRow({ file, onDelete }: { file: SampleLibraryFile; onDelete:
         <circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
       </svg>
       <span className="truncate flex-1">{file.displayName}</span>
+      {file.detectedBpm != null && (
+        <span
+          className="shrink-0 text-[9px] font-semibold text-ghost-green/70 tabular-nums px-1"
+          title={`Detected BPM ${file.detectedBpm.toFixed(1)}${file.bpmConfidence != null ? ` (confidence ${(file.bpmConfidence * 100).toFixed(0)}%)` : ''}`}
+        >
+          {Math.round(file.detectedBpm)}
+        </span>
+      )}
       <button
         title="Delete sample"
         onClick={(e) => { e.stopPropagation(); onDelete(); }}

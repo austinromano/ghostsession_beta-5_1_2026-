@@ -12,6 +12,7 @@ import { mkdir, stat, unlink, copyFile, readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { parseWavPeaks, setCachedPeaks } from '../lib/peaks.js';
+import { analyseWav, type BpmAnalysis } from '../lib/bpm.js';
 
 const UPLOADS_DIR = resolve(import.meta.dirname, '../../uploads');
 
@@ -31,8 +32,12 @@ sampleLibraryRoutes.get('/', async (c) => {
     .where(eq(sampleLibraryFiles.userId, user.id))
     .orderBy(asc(sampleLibraryFiles.displayName))
     .all();
-  // Strip storage key from the response — it's a backend detail.
-  const fileList = rows.map(({ s3Key, ...rest }) => rest);
+  // Strip the storage key (backend detail) and expand beats_json so the
+  // client gets a real array to work with.
+  const fileList = rows.map(({ s3Key, beatsJson, ...rest }) => ({
+    ...rest,
+    beats: beatsJson ? (() => { try { return JSON.parse(beatsJson); } catch { return null; } })() : null,
+  }));
   return c.json({ success: true, data: { folders, files: fileList } });
 });
 
@@ -116,11 +121,21 @@ sampleLibraryRoutes.post('/upload', async (c) => {
     setCachedPeaks(`${id}:1024`, parsed);
   } catch { peaksJson = null; }
 
+  // BPM + beat analysis. Only works on WAV today; silently skips other
+  // formats — we'll add format coverage when time-stretching lands.
+  let analysis: BpmAnalysis | null = null;
+  try { analysis = analyseWav(buffer); } catch (err) { console.warn('[sample-library] bpm analysis failed:', err); }
+
   const now = new Date().toISOString();
   await db.insert(sampleLibraryFiles).values({
     id, userId: user.id, folderId,
     fileName: file.name, displayName: file.name,
-    fileSize: file.size, mimeType, s3Key, peaks: peaksJson, createdAt: now,
+    fileSize: file.size, mimeType, s3Key, peaks: peaksJson,
+    detectedBpm: analysis?.bpm ?? null,
+    bpmConfidence: analysis?.confidence ?? null,
+    firstBeatOffset: analysis?.firstBeatOffset ?? null,
+    beatsJson: analysis ? JSON.stringify(analysis.beats) : null,
+    createdAt: now,
   }).run();
 
   return c.json({
@@ -128,7 +143,12 @@ sampleLibraryRoutes.post('/upload', async (c) => {
     data: {
       id, userId: user.id, folderId,
       fileName: file.name, displayName: file.name,
-      fileSize: file.size, mimeType, peaks: peaksJson, createdAt: now,
+      fileSize: file.size, mimeType, peaks: peaksJson,
+      detectedBpm: analysis?.bpm ?? null,
+      bpmConfidence: analysis?.confidence ?? null,
+      firstBeatOffset: analysis?.firstBeatOffset ?? null,
+      beats: analysis?.beats ?? null,
+      createdAt: now,
     },
   }, 201);
 });
@@ -238,7 +258,11 @@ sampleLibraryRoutes.post('/files/:id/copy-to-project/:projectId', async (c) => {
   await db.insert(files).values({
     id: newFileId, projectId, uploadedBy: user.id,
     fileName: src.fileName, fileSize: src.fileSize, mimeType: src.mimeType,
-    s3Key: destKey, peaks: src.peaks, createdAt: new Date().toISOString(),
+    s3Key: destKey, peaks: src.peaks,
+    // Carry the library's analysis across — saves re-running on copy.
+    detectedBpm: src.detectedBpm, bpmConfidence: src.bpmConfidence,
+    firstBeatOffset: src.firstBeatOffset, beatsJson: src.beatsJson,
+    createdAt: new Date().toISOString(),
   }).run();
 
   // Create the track row so the arrangement renders it right away.

@@ -109,6 +109,11 @@ export const files = sqliteTable('files', {
   mimeType: text('mime_type').notNull(),
   s3Key: text('s3_key').notNull(),
   peaks: text('peaks'),
+  // BPM + beat analysis (populated at upload or copied from library).
+  detectedBpm: real('detected_bpm'),
+  bpmConfidence: real('bpm_confidence'),
+  firstBeatOffset: real('first_beat_offset'),
+  beatsJson: text('beats_json'),
   createdAt: timestamp('created_at').notNull(),
 });
 
@@ -154,6 +159,12 @@ export const sampleLibraryFiles = sqliteTable('sample_library_files', {
   mimeType: text('mime_type').notNull(),
   s3Key: text('s3_key').notNull(),
   peaks: text('peaks'),
+  // BPM + beat analysis populated at upload time for WAVs. All nullable
+  // because analysis can fail / be unsupported for a given format.
+  detectedBpm: real('detected_bpm'),
+  bpmConfidence: real('bpm_confidence'),
+  firstBeatOffset: real('first_beat_offset'),
+  beatsJson: text('beats_json'),
   createdAt: timestamp('created_at').notNull(),
 });
 
