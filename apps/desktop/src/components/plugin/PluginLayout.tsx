@@ -203,6 +203,12 @@ export default function PluginLayout() {
   };
 
   const selectProject = async (id: string) => {
+    // No-op when the same project is already open. Re-running the cleanup +
+    // refetch cycle here is what used to flash the arrangement back to its
+    // default layout, because the audio store gets wiped and repopulated
+    // asynchronously. If the user wants to refresh, the dedicated refresh
+    // button handles it without touching the audio store.
+    if (id === selectedProjectId) return;
     if (selectedProjectId) {
       // Flush any pending arrangement save *before* audioCleanup wipes
       // the audio store. The debounced save in TransportBar runs 500 ms
