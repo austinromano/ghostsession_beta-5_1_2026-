@@ -331,6 +331,14 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         useAudioStore.getState().clearSelection();
         return;
       }
+      // Spacebar toggles play / pause. Uses the same input-field guard so
+      // typing a space in chat or rename fields isn't hijacked.
+      if (e.key === ' ' || e.code === 'Space') {
+        e.preventDefault();
+        const { isPlaying, play, pause } = useAudioStore.getState();
+        if (isPlaying) pause(); else play();
+        return;
+      }
       // Delete / Backspace: deletes the whole current selection. Works
       // without a modifier because that's how users expect it.
       if (e.key === 'Delete' || e.key === 'Backspace') {

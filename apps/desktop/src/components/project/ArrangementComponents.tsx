@@ -129,12 +129,25 @@ function useArrangement() {
 }
 
 export function BarRuler() {
-  const { numBars } = useArrangement();
+  const { numBars, arrangementDur } = useArrangement();
+  const seekTo = useAudioStore((s) => s.seekTo);
   // Thin the label density as bar count grows so text doesn't crowd.
   const step = numBars <= 24 ? 2 : numBars <= 48 ? 4 : numBars <= 96 ? 8 : 16;
 
+  const handleSeek = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (arrangementDur <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    seekTo(ratio * arrangementDur);
+  };
+
   return (
-    <div className="relative h-[18px] w-full select-none" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+    <div
+      className="relative h-[18px] w-full select-none cursor-pointer"
+      style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}
+      onClick={handleSeek}
+      title="Click to seek"
+    >
       {Array.from({ length: numBars }).map((_, i) => {
         const leftPct = (i / numBars) * 100;
         const labeled = i % step === 0;
