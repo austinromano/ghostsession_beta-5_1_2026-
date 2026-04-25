@@ -113,3 +113,15 @@ export function emitBookingUpdated(userIds: string[], kind: 'created' | 'updated
 export function emitArrangementUpdated(projectId: string, arrangementJson: string | null) {
   ioInstance?.to(`project:${projectId}`).emit('arrangement-updated', { projectId, arrangementJson });
 }
+
+/** Comment thread events — broadcast to everyone in the project room so a
+ *  newly-dropped pin appears for collaborators without a refetch. */
+export function emitCommentAdded(projectId: string, comment: unknown) {
+  ioInstance?.to(`project:${projectId}`).emit('comment-added', { projectId, comment });
+}
+export function emitCommentDeleted(projectId: string, commentId: string) {
+  ioInstance?.to(`project:${projectId}`).emit('comment-deleted', { projectId, commentId });
+}
+export function emitCommentUpdated(projectId: string, comment: unknown) {
+  ioInstance?.to(`project:${projectId}`).emit('comment-updated', { projectId, comment });
+}

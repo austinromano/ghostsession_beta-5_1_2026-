@@ -170,6 +170,11 @@ export interface ServerToClientEvents {
   // clients can patch their local state without refetching the entire
   // project detail (which includes peaks and can be 200-400 KB per track).
   'arrangement-updated': (data: { projectId: string; arrangementJson: string | null }) => void;
+  // Timeline-positioned comment events. Carries the full comment row so the
+  // client can patch state without refetching the comment list.
+  'comment-added': (data: { projectId: string; comment: unknown }) => void;
+  'comment-updated': (data: { projectId: string; comment: unknown }) => void;
+  'comment-deleted': (data: { projectId: string; commentId: string }) => void;
   'transport:remote-tick': (data: {
     projectId: string;
     userId: string;

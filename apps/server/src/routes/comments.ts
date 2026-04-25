@@ -6,6 +6,7 @@ import { comments, users } from '../db/schema.js';
 import { eq, desc } from 'drizzle-orm';
 import { authMiddleware, type AuthUser } from '../middleware/auth.js';
 import { assertMember, assertEditor } from '../lib/membership.js';
+import { emitCommentAdded, emitCommentDeleted, emitCommentUpdated } from '../ws/index.js';
 
 const commentRoutes = new Hono();
 commentRoutes.use('*', authMiddleware);
@@ -47,10 +48,9 @@ commentRoutes.post('/', async (c) => {
     createdAt: now, updatedAt: now,
   }).run();
 
-  return c.json({
-    success: true,
-    data: { id, projectId, authorId: user.id, authorName: user.displayName, authorAvatarUrl: user.avatarUrl, text: body.text, positionBeats: body.positionBeats ?? null, parentId: body.parentId ?? null, createdAt: now, updatedAt: now },
-  }, 201);
+  const data = { id, projectId, authorId: user.id, authorName: user.displayName, authorAvatarUrl: user.avatarUrl, text: body.text, positionBeats: body.positionBeats ?? null, parentId: body.parentId ?? null, createdAt: now, updatedAt: now };
+  emitCommentAdded(projectId, data);
+  return c.json({ success: true, data }, 201);
 });
 
 commentRoutes.patch('/:commentId', async (c) => {
@@ -65,6 +65,7 @@ commentRoutes.patch('/:commentId', async (c) => {
     .where(eq(comments.id, commentId)).run();
 
   const [updated] = await db.select().from(comments).where(eq(comments.id, commentId)).all();
+  if (updated) emitCommentUpdated(updated.projectId, updated);
   return c.json({ success: true, data: updated });
 });
 
@@ -76,6 +77,7 @@ commentRoutes.delete('/:commentId', async (c) => {
   if (!existing || existing.authorId !== user.id) throw new HTTPException(403, { message: 'Cannot delete' });
 
   await db.delete(comments).where(eq(comments.id, commentId)).run();
+  emitCommentDeleted(existing.projectId, commentId);
   return c.json({ success: true });
 });
 

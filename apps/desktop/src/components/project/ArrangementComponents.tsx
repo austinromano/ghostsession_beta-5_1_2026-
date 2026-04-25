@@ -227,7 +227,7 @@ export function ArrangementScrollView({ children, showAll }: { children: React.R
 // Shared time axis for the arrangement: at least 16 bars wide, stretches to
 // cover the longest clip. Ruler, clips, and playhead all position against this
 // so they stay aligned regardless of BPM or project length.
-function useArrangement() {
+export function useArrangement() {
   const projectBpm = useAudioStore((s) => s.projectBpm);
   const duration = useAudioStore((s) => s.duration);
   const bpm = projectBpm > 0 ? projectBpm : 120;
