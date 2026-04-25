@@ -144,9 +144,14 @@ export default function ArrangementComments({ projectId }: Props) {
                 }}
                 className="relative w-6 h-6 flex items-center justify-center rounded-full ring-2 ring-black/40 hover:ring-ghost-green/70 transition-all"
                 style={{ background: '#FFEB3B' }}
-                title={`${c.authorName}: ${c.text.slice(0, 60)}`}
+                title={`${c.authorName}: ${c.text.slice(0, 80)}`}
               >
-                <Avatar name={c.authorName} src={c.authorAvatarUrl} size="xs" userId={c.authorId} />
+                {/* Pass userId={null} so the Avatar doesn't try to navigate
+                    to the author's profile on click — this button needs the
+                    click event to open the thread popover instead. */}
+                <span className="pointer-events-none">
+                  <Avatar name={c.authorName} src={c.authorAvatarUrl} size="xs" userId={null} />
+                </span>
               </button>
               {isOpen && (
                 <ThreadPopover
@@ -173,7 +178,9 @@ export default function ArrangementComments({ projectId }: Props) {
               className="w-6 h-6 flex items-center justify-center rounded-full ring-2 ring-black/40 animate-pulse"
               style={{ background: '#FFEB3B' }}
             >
-              <Avatar name={me?.displayName || '?'} src={me?.avatarUrl ?? null} size="xs" userId={me?.id ?? null} />
+              <span className="pointer-events-none">
+                <Avatar name={me?.displayName || '?'} src={me?.avatarUrl ?? null} size="xs" userId={null} />
+              </span>
             </div>
             <ComposePopover
               onSubmit={submitPending}
@@ -243,21 +250,30 @@ function ThreadPopover({ thread, replies, meUserId, onClose, onReply, onDelete }
 }
 
 function CommentItem({ c, canDelete, onDelete }: { c: ArrangementComment; canDelete: boolean; onDelete: () => void }) {
+  // Figma-style row: avatar + author + relative time on the top line,
+  // body wraps below, persistent trash icon on the right when the user
+  // owns this message. No click navigation on the avatar inside the
+  // popover — keeps focus on the comment thread itself.
+  const ago = relativeTime(c.createdAt);
   return (
     <div className="flex gap-2 group">
-      <div className="shrink-0 mt-0.5">
-        <Avatar name={c.authorName} src={c.authorAvatarUrl} size="sm" userId={c.authorId} />
+      <div className="shrink-0 mt-0.5 pointer-events-none">
+        <Avatar name={c.authorName} src={c.authorAvatarUrl} size="sm" userId={null} />
       </div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] font-semibold text-white/85 truncate">{c.authorName}</span>
+          <span className="text-[9px] text-white/35 tabular-nums">{ago}</span>
           {canDelete && (
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(); }}
-              className="text-[10px] text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity ml-auto"
-              title="Delete"
+              className="ml-auto shrink-0 w-5 h-5 flex items-center justify-center rounded text-white/45 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+              title="Delete comment"
             >
-              ×
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
             </button>
           )}
         </div>
@@ -265,6 +281,17 @@ function CommentItem({ c, canDelete, onDelete }: { c: ArrangementComment; canDel
       </div>
     </div>
   );
+}
+
+function relativeTime(iso: string): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return '';
+  const diff = Math.max(0, Date.now() - t) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}d`;
+  return new Date(t).toLocaleDateString();
 }
 
 // ── Compose popover (new pin) ────────────────────────────────────────────
