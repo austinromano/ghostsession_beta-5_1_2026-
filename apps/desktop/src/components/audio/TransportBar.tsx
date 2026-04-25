@@ -8,19 +8,23 @@ import { useCollabStore } from '../../stores/collabStore';
 import FrequencyBar, { type VizMode } from './FrequencyBar';
 
 // Module-level clipboard for the project's clip copy/paste keyboard
-// shortcuts. Lives outside React state because it's a pure side-channel
-// — Ctrl+C just stashes a track snapshot here, Ctrl+V reads it back.
+// shortcuts. Stores a bundle of clips with their RELATIVE offsets so
+// pasting a multi-selection preserves the time spacing between them.
 //
-// `nextOffset` is the position to drop the NEXT paste at. Initialised to
-// (source.startOffset + source.duration) so the first paste lands right
-// after the original; each Ctrl+V advances it by the source duration so
-// repeated pastes lay copies end-to-end without overlapping.
-let clipClipboard: {
+// `baseOffset` is where the first paste batch starts. Subsequent pastes
+// advance by the bundle's total duration so repeated Ctrl+V lays batches
+// end-to-end instead of stacking.
+interface ClipboardItem {
   fileId: string;
   name: string;
   type: string;
-  nextOffset: number;
+  relOffset: number;   // seconds from the bundle's earliest clip
   duration: number;
+}
+let clipClipboard: {
+  items: ClipboardItem[];
+  bundleDuration: number;  // earliestOffset..latestEnd span
+  nextBaseOffset: number;  // where the NEXT Ctrl+V batch starts
 } | null = null;
 
 export default function TransportBar({ tracks, projectId, projectTempo, onTempoChange, trackZoom, onZoomChange, vizMode }: { tracks?: any[]; projectId?: string; projectTempo?: number; onTempoChange?: (bpm: number) => void; trackZoom?: 'full' | 'half'; onZoomChange?: (zoom: 'full' | 'half') => void; vizMode?: VizMode }) {
@@ -324,61 +328,89 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       const tag = tgt?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tgt?.isContentEditable) return;
       if (e.key === 'Escape') {
-        useAudioStore.getState().setSelectedTrackId(null);
+        useAudioStore.getState().clearSelection();
+        return;
+      }
+      // Delete / Backspace: deletes the whole current selection. Works
+      // without a modifier because that's how users expect it.
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        const selIds = Array.from(useAudioStore.getState().selectedTrackIds);
+        if (selIds.length === 0) return;
+        e.preventDefault();
+        for (const id of selIds) {
+          useAudioStore.getState().removeTrack(id);
+          try { await api.deleteTrack(projectId, id); } catch { /* ignore */ }
+        }
+        useAudioStore.getState().clearSelection();
+        window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
         return;
       }
       const mod = e.ctrlKey || e.metaKey;
       if (!mod) return;
       const k = e.key.toLowerCase();
-      const stashClipboardFromTrack = (id: string) => {
-        const t = tracks?.find((x: any) => x.id === id);
-        if (!t || !t.fileId) return false;
-        const loaded = useAudioStore.getState().loadedTracks.get(id);
-        const duration = loaded?.buffer?.duration || 0;
-        const sourceOffset = loaded?.startOffset ?? 0;
+      const buildClipboardFromSelection = (selIds: string[]): boolean => {
+        if (!tracks || selIds.length === 0) return false;
+        const loadedTracks = useAudioStore.getState().loadedTracks;
+        const items: ClipboardItem[] = [];
+        let earliest = Infinity;
+        let latestEnd = 0;
+        for (const id of selIds) {
+          const t = tracks.find((x: any) => x.id === id);
+          if (!t || !t.fileId) continue;
+          const loaded = loadedTracks.get(id);
+          const duration = loaded?.buffer?.duration || 0;
+          const offset = loaded?.startOffset ?? 0;
+          if (offset < earliest) earliest = offset;
+          if (offset + duration > latestEnd) latestEnd = offset + duration;
+          items.push({ fileId: t.fileId, name: t.name || 'Clip', type: t.type || 'audio', relOffset: offset, duration });
+        }
+        if (items.length === 0) return false;
+        // Normalise relOffset to the bundle's earliest clip.
+        for (const it of items) it.relOffset = it.relOffset - earliest;
+        const bundleDuration = latestEnd - earliest;
         clipClipboard = {
-          fileId: t.fileId,
-          name: t.name || 'Clip',
-          type: t.type || 'audio',
-          duration,
-          // First paste lands immediately after the source clip.
-          nextOffset: sourceOffset + duration,
+          items,
+          bundleDuration,
+          // First paste batch starts right after the last clip in the bundle.
+          nextBaseOffset: latestEnd,
         };
         return true;
       };
 
       if (k === 'c') {
-        const id = useAudioStore.getState().selectedTrackId;
-        if (!id || !tracks) return;
-        if (!stashClipboardFromTrack(id)) return;
+        const selIds = Array.from(useAudioStore.getState().selectedTrackIds);
+        if (selIds.length === 0) return;
+        if (!buildClipboardFromSelection(selIds)) return;
         e.preventDefault();
       } else if (k === 'x') {
-        // Cut = copy + delete.
-        const id = useAudioStore.getState().selectedTrackId;
-        if (!id || !tracks) return;
-        if (!stashClipboardFromTrack(id)) return;
+        // Cut = copy + delete every selected clip.
+        const selIds = Array.from(useAudioStore.getState().selectedTrackIds);
+        if (selIds.length === 0) return;
+        if (!buildClipboardFromSelection(selIds)) return;
         e.preventDefault();
-        useAudioStore.getState().removeTrack(id);
-        try { await api.deleteTrack(projectId, id); } catch { /* ignore */ }
-        useAudioStore.getState().setSelectedTrackId(null);
+        for (const id of selIds) {
+          useAudioStore.getState().removeTrack(id);
+          try { await api.deleteTrack(projectId, id); } catch { /* ignore */ }
+        }
+        useAudioStore.getState().clearSelection();
         window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
       } else if (k === 'v') {
         if (!clipClipboard) return;
         e.preventDefault();
         const projectBpm = useAudioStore.getState().projectBpm || 120;
         const grid = useAudioStore.getState().gridDivision;
-        // Drop right after the source (or after the previous paste, since
-        // nextOffset auto-advances), snapped to the active grid.
-        const newOffset = Math.max(0, snapToGrid(clipClipboard.nextOffset, projectBpm, grid, 'nearest'));
+        const baseOffset = Math.max(0, snapToGrid(clipClipboard.nextBaseOffset, projectBpm, grid, 'nearest'));
         try {
-          const result = await api.addTrack(projectId, {
-            name: clipClipboard.name, type: clipClipboard.type as any,
-            fileId: clipClipboard.fileId, fileName: clipClipboard.name,
-          } as any);
-          if (result?.id) pendingTrackOffsets.set(result.id, newOffset);
-          // Advance for the next paste so a series of Ctrl+V lays clips
-          // end-to-end instead of stacking at the same spot.
-          clipClipboard.nextOffset = newOffset + clipClipboard.duration;
+          for (const item of clipClipboard.items) {
+            const itemOffset = baseOffset + item.relOffset;
+            const result = await api.addTrack(projectId, {
+              name: item.name, type: item.type as any,
+              fileId: item.fileId, fileName: item.name,
+            } as any);
+            if (result?.id) pendingTrackOffsets.set(result.id, itemOffset);
+          }
+          // Advance the base for the next Ctrl+V so batches lay end-to-end.
+          clipClipboard.nextBaseOffset = baseOffset + clipClipboard.bundleDuration;
           window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
           window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
         } catch { /* swallow — UI will surface via project refresh */ }

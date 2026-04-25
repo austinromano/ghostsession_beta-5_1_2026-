@@ -57,11 +57,15 @@ interface AudioState {
   soloCurrentTime: number;
   soloDuration: number;
   loadError: string | null;
-  // Currently-selected clip id. Drives the selected ring on LaneClip and is
-  // what Ctrl+C reads when the user copies. Cleared on Escape or when the
-  // user clicks empty arrangement space.
-  selectedTrackId: string | null;
-  setSelectedTrackId: (id: string | null) => void;
+  // Currently-selected clip ids. Drives the green ring on every selected
+  // LaneClip and is the working set for Ctrl+C / Ctrl+V / Ctrl+X / Delete.
+  // A single click replaces the set, Shift/Ctrl+click adds-or-toggles, and
+  // marquee drag in empty arrangement space replaces with intersected clips.
+  selectedTrackIds: Set<string>;
+  setSelectedTrackIds: (ids: Iterable<string>) => void;
+  toggleTrackSelection: (id: string) => void;
+  addTrackToSelection: (id: string) => void;
+  clearSelection: () => void;
   // Grid snap subdivision — fraction of a bar. 1 = whole bar, 0.25 = quarter
   // note, 0.125 = eighth note, 0.0625 = sixteenth note. Drives every snap-
   // to-grid call across the arrangement (clip drag, paste, duplicate, trim).
@@ -257,8 +261,20 @@ export const useAudioStore = create<AudioState>((set, get) => {
     soloCurrentTime: 0,
     soloDuration: 0,
     loadError: null,
-    selectedTrackId: null,
-    setSelectedTrackId: (id) => set({ selectedTrackId: id }),
+    selectedTrackIds: new Set<string>(),
+    setSelectedTrackIds: (ids) => set({ selectedTrackIds: new Set(ids) }),
+    toggleTrackSelection: (id) => set((s) => {
+      const next = new Set(s.selectedTrackIds);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return { selectedTrackIds: next };
+    }),
+    addTrackToSelection: (id) => set((s) => {
+      if (s.selectedTrackIds.has(id)) return {};
+      const next = new Set(s.selectedTrackIds);
+      next.add(id);
+      return { selectedTrackIds: next };
+    }),
+    clearSelection: () => set({ selectedTrackIds: new Set() }),
     gridDivision: (() => {
       const raw = typeof window !== 'undefined' ? window.localStorage?.getItem('ghost_grid_division') : null;
       const n = raw ? parseFloat(raw) : NaN;

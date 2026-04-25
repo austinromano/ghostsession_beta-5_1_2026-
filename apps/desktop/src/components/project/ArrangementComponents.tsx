@@ -218,9 +218,11 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
     return t.firstBeatOffset * factor;
   });
   const setTrackOffset = useAudioStore((s) => s.setTrackOffset);
-  // Selection — drives the green ring + what Ctrl+C copies.
-  const isSelected = useAudioStore((s) => s.selectedTrackId === track.id);
-  const setSelectedTrackId = useAudioStore((s) => s.setSelectedTrackId);
+  // Selection — drives the green ring + what Ctrl+C/Ctrl+V operate on.
+  const isSelected = useAudioStore((s) => s.selectedTrackIds.has(track.id));
+  const setSelectedTrackIds = useAudioStore((s) => s.setSelectedTrackIds);
+  const toggleTrackSelection = useAudioStore((s) => s.toggleTrackSelection);
+  const addTrackToSelection = useAudioStore((s) => s.addTrackToSelection);
   const [dragOffset, setDragOffset] = useState<number | null>(null);
   // If a collaborator is currently dragging this clip, lock our own drag
   // and paint a coloured ghost at their live position.
@@ -257,31 +259,55 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
     };
   }, [menu]);
 
+  // Build the list of clips these actions apply to: the whole selection if
+  // this clip is part of a multi-selection, otherwise just this clip.
+  const targetsForAction = (): string[] => {
+    const sel = useAudioStore.getState().selectedTrackIds;
+    if (sel.has(track.id) && sel.size > 1) return Array.from(sel);
+    return [track.id];
+  };
+
   const duplicateClip = async () => {
-    if (!track.fileId) return;
-    const loaded = useAudioStore.getState().loadedTracks.get(track.id);
-    const clipDuration = loaded?.buffer?.duration || 0;
-    const currentOffset = loaded?.startOffset ?? 0;
-    const rawOffset = currentOffset + clipDuration;
+    const ids = targetsForAction();
     const projectBpm = useAudioStore.getState().projectBpm || 120;
     const grid = useAudioStore.getState().gridDivision;
-    const newOffset = Math.max(0, snapToGrid(rawOffset, projectBpm, grid, 'nearest'));
-    const result = await api.addTrack(selectedProjectId, { name: (track.name || 'Track'), type: track.type || 'audio', fileId: track.fileId, fileName: track.name } as any);
-    if (result?.id) pendingTrackOffsets.set(result.id, newOffset);
+    const loadedTracks = useAudioStore.getState().loadedTracks;
+    const projectTracks = (useProjectStore.getState().currentProject?.tracks || []) as any[];
+    for (const id of ids) {
+      const srcTrack = projectTracks.find((t: any) => t.id === id);
+      if (!srcTrack?.fileId) continue;
+      const loaded = loadedTracks.get(id);
+      const clipDuration = loaded?.buffer?.duration || 0;
+      const rawOffset = (loaded?.startOffset ?? 0) + clipDuration;
+      const newOffset = Math.max(0, snapToGrid(rawOffset, projectBpm, grid, 'nearest'));
+      const result = await api.addTrack(selectedProjectId, {
+        name: srcTrack.name || 'Track', type: srcTrack.type || 'audio',
+        fileId: srcTrack.fileId, fileName: srcTrack.name,
+      } as any);
+      if (result?.id) pendingTrackOffsets.set(result.id, newOffset);
+    }
     window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
     window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
   };
 
-  const deleteClip = () => {
-    useAudioStore.getState().removeTrack(track.id);
-    deleteTrack(selectedProjectId, track.id);
+  const deleteClip = async () => {
+    const ids = targetsForAction();
+    for (const id of ids) {
+      useAudioStore.getState().removeTrack(id);
+      try { await deleteTrack(selectedProjectId, id); } catch { /* continue remaining */ }
+    }
+    useAudioStore.getState().clearSelection();
   };
 
   const handleContextMenu = (e: React.MouseEvent) => {
     if (remoteDrag) return;
     e.preventDefault();
     e.stopPropagation();
-    setSelectedTrackId(track.id);
+    // Right-click on a clip that isn't already in the selection replaces
+    // selection with just this clip (so menu actions apply to what the
+    // user visibly right-clicked). Right-click on a clip that IS in the
+    // selection keeps the multi-selection intact.
+    if (!isSelected) setSelectedTrackIds([track.id]);
     setMenu({ x: e.clientX, y: e.clientY });
   };
 
@@ -290,8 +316,12 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
     if (!haveTime) return;
     // Conflict guard: someone else is already dragging this clip.
     if (remoteDrag) return;
-    // Click selects this clip — what Ctrl+C will copy.
-    setSelectedTrackId(track.id);
+    // Selection semantics: shift or ctrl/cmd extends; plain click replaces.
+    if (e.shiftKey) addTrackToSelection(track.id);
+    else if (e.ctrlKey || e.metaKey) toggleTrackSelection(track.id);
+    else if (!isSelected) setSelectedTrackIds([track.id]);
+    // If the clip is already in a multi-selection and user just clicks,
+    // leave the selection as-is (so they can then drag the whole group).
     const clipEl = e.currentTarget;
     const laneEl = clipEl.parentElement;
     if (!laneEl) return;
@@ -368,6 +398,7 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
       </div>
     )}
     <div
+      data-clip-id={track.id}
       onPointerDown={handlePointerDown}
       onContextMenu={handleContextMenu}
       className={`absolute top-1 bottom-1 group rounded-lg overflow-hidden ${haveTime && !remoteDrag ? 'cursor-grab active:cursor-grabbing' : ''} ${remoteDrag ? 'cursor-not-allowed' : ''}`}
@@ -512,8 +543,73 @@ export function DraggableTrackList({ tracks, selectedProjectId, deleteTrack, upd
 
   const laneHeight = trackZoom === 'half' ? 50 : 72;
 
+  // Marquee (rubber-band) multi-select. Pointer down on empty lane space
+  // starts it; on release every clip whose bounding rect intersects the
+  // marquee is dumped into the selection. Hit-testing via the data-clip-id
+  // attribute on LaneClip — cheaper than maintaining a rect cache, and
+  // accurate regardless of how the arrangement was scrolled/zoomed.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [marquee, setMarquee] = useState<null | { x1: number; y1: number; x2: number; y2: number }>(null);
+  const setSelectedTrackIds = useAudioStore((s) => s.setSelectedTrackIds);
+  const clearSelection = useAudioStore((s) => s.clearSelection);
+
+  const handleMarqueeStart = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Don't start a marquee if the user actually grabbed a clip.
+    const target = e.target as HTMLElement;
+    if (target.closest('[data-clip-id]')) return;
+    if (e.button !== 0) return;
+    const root = containerRef.current;
+    if (!root) return;
+    const rect = root.getBoundingClientRect();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    // Plain click on empty space clears the selection immediately. If this
+    // turns into a drag, the marquee will replace it with its own set.
+    if (!e.shiftKey && !e.ctrlKey && !e.metaKey) clearSelection();
+    let dragged = false;
+    const onMove = (ev: PointerEvent) => {
+      if (!dragged && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 4) return;
+      dragged = true;
+      setMarquee({ x1: startX, y1: startY, x2: ev.clientX, y2: ev.clientY });
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      if (!dragged) { setMarquee(null); return; }
+      // Read final marquee rect and hit-test every clip.
+      const minX = Math.min(startX, (window as any).__lastMoveX ?? startX);
+      setMarquee((m) => {
+        if (!m) return null;
+        const nx1 = Math.min(m.x1, m.x2), ny1 = Math.min(m.y1, m.y2);
+        const nx2 = Math.max(m.x1, m.x2), ny2 = Math.max(m.y1, m.y2);
+        const hits = new Set<string>();
+        const extant = useAudioStore.getState().selectedTrackIds;
+        // Preserve existing selection when Shift/Ctrl is held.
+        if (e.shiftKey || e.ctrlKey || e.metaKey) for (const id of extant) hits.add(id);
+        root.querySelectorAll<HTMLElement>('[data-clip-id]').forEach((el) => {
+          const cr = el.getBoundingClientRect();
+          const intersects = !(cr.right < nx1 || cr.left > nx2 || cr.bottom < ny1 || cr.top > ny2);
+          if (intersects) {
+            const id = el.getAttribute('data-clip-id');
+            if (id) hits.add(id);
+          }
+        });
+        setSelectedTrackIds(hits);
+        return null;
+      });
+      void minX;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    void rect;
+  };
+
   return (
-    <div className="flex flex-col gap-1 mt-2">
+    <div
+      ref={containerRef}
+      className="relative flex flex-col gap-1 mt-2"
+      onPointerDown={handleMarqueeStart}
+    >
       {Array.from(lanes.entries()).map(([fileId, laneTracks]) => (
         <div
           key={fileId}
@@ -535,6 +631,22 @@ export function DraggableTrackList({ tracks, selectedProjectId, deleteTrack, upd
           ))}
         </div>
       ))}
+      {marquee && (
+        <div
+          className="pointer-events-none"
+          style={{
+            position: 'fixed',
+            left: Math.min(marquee.x1, marquee.x2),
+            top: Math.min(marquee.y1, marquee.y2),
+            width: Math.abs(marquee.x2 - marquee.x1),
+            height: Math.abs(marquee.y2 - marquee.y1),
+            background: 'rgba(0, 255, 200, 0.08)',
+            border: '1px solid rgba(0, 255, 200, 0.6)',
+            borderRadius: 4,
+            zIndex: 40,
+          }}
+        />
+      )}
     </div>
   );
 }
