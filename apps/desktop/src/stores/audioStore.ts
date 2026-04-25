@@ -320,6 +320,11 @@ export const useAudioStore = create<AudioState>((set, get) => {
       set((s) => {
         const m = new Map(s.loadedTracks);
         const existing = m.get(trackId);
+        // If we're about to overwrite a still-playing source, stop it first
+        // and disconnect its gain — otherwise it plays on as an orphan even
+        // after the visible clip is gone.
+        if (existing?.source) safeStop(existing.source);
+        if (existing?.gainNode) { try { existing.gainNode.disconnect(); } catch { /* ignore */ } }
         const pending = pendingTrackOffsets.get(trackId);
         if (pending !== undefined) pendingTrackOffsets.delete(trackId);
 
@@ -374,6 +379,11 @@ export const useAudioStore = create<AudioState>((set, get) => {
           { character: track.character, beats: track.beats },
         );
         if (nextBuffer !== track.buffer) {
+          // Stop + disconnect the previous source before we drop the
+          // reference — restartIfPlaying below will spin up fresh sources
+          // from the new buffer.
+          if (track.source) safeStop(track.source);
+          if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
           m.set(id, { ...track, buffer: nextBuffer, source: null, gainNode: null });
           changed = true;
         }
@@ -467,8 +477,20 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const track = loadedTracks.get(trackId);
       if (!track) return;
       if (track.source) safeStop(track.source);
+      if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
       loadedTracks.delete(trackId);
-      set({ loadedTracks: new Map(loadedTracks) });
+      // If that was the last track, fully stop the project — kill any
+      // leftover module-level sources (solo) and cancel the RAF loop.
+      // Defensive: protects against any orphan AudioBufferSourceNode that
+      // was created in a brief race window before the delete fired.
+      if (loadedTracks.size === 0) {
+        stopAllSources();
+        stopSolo();
+        if (rafId) { cancelAnimationFrame(rafId); rafId = null; }
+        set({ loadedTracks: new Map(loadedTracks), isPlaying: false, currentTime: 0 });
+      } else {
+        set({ loadedTracks: new Map(loadedTracks) });
+      }
       recalcDuration();
     },
 
