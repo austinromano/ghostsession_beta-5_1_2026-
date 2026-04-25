@@ -699,6 +699,44 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
   const dragControls = useDragControls();
   const hue = laneHueForKey(laneKey);
   const laneName = laneTracks[0]?.name || 'Track';
+  const setTrackMuted = useAudioStore((s) => s.setTrackMuted);
+  // True if every clip in this lane is currently muted — drives the
+  // menu toggle's checkmark + label.
+  const laneIsMuted = useAudioStore((s) => {
+    const ids = laneTracks.map((t: any) => t.id);
+    if (ids.length === 0) return false;
+    return ids.every((id: string) => s.loadedTracks.get(id)?.muted === true);
+  });
+  // Right-click menu on the header (anchor in screen coords).
+  const [headerMenu, setHeaderMenu] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!headerMenu) return;
+    const onDown = () => setHeaderMenu(null);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setHeaderMenu(null); };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('mousedown', onDown);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [headerMenu]);
+
+  const toggleLaneMute = () => {
+    const target = !laneIsMuted;
+    for (const t of laneTracks) setTrackMuted(t.id, target);
+    window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+  };
+
+  const deleteLane = async () => {
+    const count = laneTracks.length;
+    const cleanName = laneName.replace(/\.(wav|mp3|flac|aiff|ogg|m4a|aac)$/i, '');
+    if (!window.confirm(`Delete the entire "${cleanName}" track? This removes ${count} clip${count === 1 ? '' : 's'} from the arrangement.`)) return;
+    for (const t of laneTracks) {
+      useAudioStore.getState().removeTrack(t.id);
+      try { await deleteTrack(selectedProjectId, t.id); } catch { /* keep going */ }
+    }
+    window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
+  };
 
   return (
     <Reorder.Item
@@ -716,20 +754,28 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
       <div
         data-track-header
         onPointerDown={(e) => {
-          // Don't drag when the user clicks an in-header control (none yet
-          // but future-proof). Left-button only.
           if (e.button !== 0) return;
           e.preventDefault();
           dragControls.start(e);
         }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setHeaderMenu({ x: e.clientX, y: e.clientY });
+        }}
         className="h-full flex"
         style={{ cursor: 'grab' }}
       >
-        <TrackHeader name={laneName} hue={hue} trackIds={laneTracks.map((t: any) => t.id)} />
+        <TrackHeader name={laneName} hue={hue} trackIds={laneTracks.map((t: any) => t.id)} isSelected={laneIsMuted} />
       </div>
       <div
         className="relative rounded-r-lg flex-1"
-        style={{ background: 'rgba(10,4,18,0.4)', borderBottom: '1px solid rgba(255,255,255,0.04)' }}
+        style={{
+          background: 'rgba(10,4,18,0.4)',
+          borderBottom: '1px solid rgba(255,255,255,0.04)',
+          opacity: laneIsMuted ? 0.45 : 1,
+          transition: 'opacity 0.15s linear',
+        }}
       >
         {laneTracks.map((track: any, idx: number) => (
           <LaneClip
@@ -745,6 +791,45 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
           />
         ))}
       </div>
+      {headerMenu && (
+        <div
+          onMouseDown={(e) => e.stopPropagation()}
+          className="fixed z-[60] min-w-[160px] rounded-md py-1 shadow-[0_8px_24px_rgba(0,0,0,0.5)] backdrop-blur-md"
+          style={{
+            left: headerMenu.x, top: headerMenu.y,
+            background: 'rgba(20, 12, 30, 0.96)',
+            border: '1px solid rgba(255,255,255,0.08)',
+          }}
+        >
+          <button
+            onClick={() => { setHeaderMenu(null); toggleLaneMute(); }}
+            className="w-full px-3 py-1.5 text-[13px] text-left text-ghost-text-secondary hover:bg-white/[0.06] hover:text-white transition-colors flex items-center gap-2"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              {laneIsMuted ? (
+                <>
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <line x1="23" y1="9" x2="17" y2="15" />
+                  <line x1="17" y1="9" x2="23" y2="15" />
+                </>
+              ) : (
+                <>
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+                </>
+              )}
+            </svg>
+            {laneIsMuted ? 'Unmute track' : 'Mute track'}
+          </button>
+          <button
+            onClick={() => { setHeaderMenu(null); deleteLane(); }}
+            className="w-full px-3 py-1.5 text-[13px] text-left text-ghost-error-red hover:bg-ghost-error-red/10 transition-colors flex items-center gap-2"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></svg>
+            Delete entire track
+          </button>
+        </div>
+      )}
     </Reorder.Item>
   );
 }
