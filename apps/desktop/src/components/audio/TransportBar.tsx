@@ -397,9 +397,14 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       } else if (k === 'v') {
         if (!clipClipboard) return;
         e.preventDefault();
-        const projectBpm = useAudioStore.getState().projectBpm || 120;
-        const grid = useAudioStore.getState().gridDivision;
-        const baseOffset = Math.max(0, snapToGrid(clipClipboard.nextBaseOffset, projectBpm, grid, 'nearest'));
+        // Paste the bundle EXACTLY adjacent to the source — no grid snap on
+        // baseOffset. Snapping the base would round to a nearby bar and
+        // either overlap the source or leave an unexpected gap. Preserving
+        // the source's exact spacing is what makes the paste visually
+        // identical to the original group. If the user wants it grid-
+        // aligned after paste, they drag the whole selection (group drag
+        // snaps by the first-beat rule already).
+        const baseOffset = Math.max(0, clipClipboard.nextBaseOffset);
         try {
           for (const item of clipClipboard.items) {
             const itemOffset = baseOffset + item.relOffset;
