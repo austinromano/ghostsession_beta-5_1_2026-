@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Reorder, useDragControls } from 'framer-motion';
 import { useAudioStore, pendingTrackOffsets } from '../../stores/audioStore';
 import { useProjectStore } from '../../stores/projectStore';
 import { useCollabStore } from '../../stores/collabStore';
@@ -569,6 +570,72 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
   );
 }
 
+/* ── Single lane row ── */
+// One reorderable lane. Drag is gated to the track header on the left so
+// pointer-down on a clip / empty clip space behaves exactly like before
+// (clip drag, marquee, etc.). useDragControls + dragListener=false is the
+// framer-motion idiom for "drag only when I tell you to."
+function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTrack, trackZoom, members }: {
+  laneKey: string;
+  laneTracks: any[];
+  laneHeight: number;
+  selectedProjectId: string;
+  deleteTrack: any;
+  trackZoom: 'full' | 'half';
+  members: Member[];
+}) {
+  const dragControls = useDragControls();
+  const hue = laneHueForKey(laneKey);
+  const laneName = laneTracks[0]?.name || 'Track';
+
+  return (
+    <Reorder.Item
+      value={laneKey}
+      dragListener={false}
+      dragControls={dragControls}
+      className="flex"
+      style={{ height: laneHeight }}
+      whileDrag={{ scale: 1.005, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
+      transition={{ duration: 0.15 }}
+      as="div"
+    >
+      {/* Track header is the drag handle. data-track-header lets the
+          marquee handler bail out without starting a rubber-band. */}
+      <div
+        data-track-header
+        onPointerDown={(e) => {
+          // Don't drag when the user clicks an in-header control (none yet
+          // but future-proof). Left-button only.
+          if (e.button !== 0) return;
+          e.preventDefault();
+          dragControls.start(e);
+        }}
+        style={{ cursor: 'grab' }}
+      >
+        <TrackHeader name={laneName} hue={hue} />
+      </div>
+      <div
+        className="relative rounded-r-lg flex-1"
+        style={{ background: 'rgba(10,4,18,0.4)', borderBottom: '1px solid rgba(255,255,255,0.04)' }}
+      >
+        {laneTracks.map((track: any, idx: number) => (
+          <LaneClip
+            key={track.id}
+            track={track}
+            selectedProjectId={selectedProjectId}
+            deleteTrack={deleteTrack}
+            trackZoom={trackZoom}
+            laneWidth={100}
+            clipIndex={idx}
+            totalClips={laneTracks.length}
+            members={members}
+          />
+        ))}
+      </div>
+    </Reorder.Item>
+  );
+}
+
 /* ── Track lanes with horizontal clips ── */
 export function DraggableTrackList({ tracks, selectedProjectId, deleteTrack, updateTrack, trackZoom, fetchProject, members = [] }: {
   tracks: any[];
@@ -652,10 +719,45 @@ export function DraggableTrackList({ tracks, selectedProjectId, deleteTrack, upd
   const setSelectedTrackIds = useAudioStore((s) => s.setSelectedTrackIds);
   const clearSelection = useAudioStore((s) => s.clearSelection);
 
+  // Per-project lane order — array of lane keys (fileId, since lanes group
+  // by fileId). Persisted to localStorage so the user's vertical layout
+  // sticks across reloads. New lanes (added later) get appended to the end.
+  const laneStorageKey = `ghost_lane_order_${selectedProjectId}`;
+  const [laneOrder, setLaneOrder] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem(laneStorageKey);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  });
+  // Reset when project changes (key includes selectedProjectId).
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(`ghost_lane_order_${selectedProjectId}`);
+      setLaneOrder(raw ? JSON.parse(raw) : []);
+    } catch { setLaneOrder([]); }
+  }, [selectedProjectId]);
+  useEffect(() => {
+    try { localStorage.setItem(laneStorageKey, JSON.stringify(laneOrder)); } catch { /* quota */ }
+  }, [laneStorageKey, laneOrder]);
+
+  const orderedLaneKeys = useMemo(() => {
+    const keys = Array.from(lanes.keys());
+    const indexOf = new Map(laneOrder.map((k, i) => [k, i]));
+    // Stable sort: lanes the user has already arranged keep their slot;
+    // brand-new lanes land at the bottom in tracks-prop order.
+    return keys.sort((a, b) => {
+      const ia = indexOf.get(a) ?? Infinity;
+      const ib = indexOf.get(b) ?? Infinity;
+      return ia - ib;
+    });
+  }, [lanes, laneOrder]);
+
   const handleMarqueeStart = (e: React.PointerEvent<HTMLDivElement>) => {
-    // Don't start a marquee if the user actually grabbed a clip.
+    // Don't start a marquee if the user actually grabbed a clip OR a track
+    // header (which now drags the whole lane up/down).
     const target = e.target as HTMLElement;
     if (target.closest('[data-clip-id]')) return;
+    if (target.closest('[data-track-header]')) return;
     if (e.button !== 0) return;
     const root = containerRef.current;
     if (!root) return;
@@ -709,38 +811,30 @@ export function DraggableTrackList({ tracks, selectedProjectId, deleteTrack, upd
       className="relative flex flex-col gap-1 mt-2"
       onPointerDown={handleMarqueeStart}
     >
-      {Array.from(lanes.entries()).map(([fileId, laneTracks]) => {
-        const headerKey = fileId || laneTracks[0]?.id || 'lane';
-        const hue = laneHueForKey(headerKey);
-        const laneName = laneTracks[0]?.name || 'Track';
-        return (
-          <div
-            key={fileId}
-            className="flex"
-            style={{ height: laneHeight }}
-          >
-            <TrackHeader name={laneName} hue={hue} />
-            <div
-              className="relative rounded-r-lg flex-1"
-              style={{ background: 'rgba(10,4,18,0.4)', borderBottom: '1px solid rgba(255,255,255,0.04)' }}
-            >
-              {laneTracks.map((track: any, idx: number) => (
-                <LaneClip
-                  key={track.id}
-                  track={track}
-                  selectedProjectId={selectedProjectId}
-                  deleteTrack={deleteTrack}
-                  trackZoom={trackZoom}
-                  laneWidth={100}
-                  clipIndex={idx}
-                  totalClips={laneTracks.length}
-                  members={members}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+      <Reorder.Group
+        axis="y"
+        values={orderedLaneKeys}
+        onReorder={setLaneOrder}
+        className="flex flex-col gap-1"
+        as="div"
+      >
+        {orderedLaneKeys.map((laneKey) => {
+          const laneTracks = lanes.get(laneKey);
+          if (!laneTracks) return null;
+          return (
+            <LaneRow
+              key={laneKey}
+              laneKey={laneKey}
+              laneTracks={laneTracks}
+              laneHeight={laneHeight}
+              selectedProjectId={selectedProjectId}
+              deleteTrack={deleteTrack}
+              trackZoom={trackZoom}
+              members={members}
+            />
+          );
+        })}
+      </Reorder.Group>
       {marquee && (
         <div
           className="pointer-events-none"
