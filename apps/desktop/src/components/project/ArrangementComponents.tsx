@@ -740,6 +740,7 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
   const setOpen = useDrumRack((s) => s.setOpen);
   const { bpm, arrangementDur } = useArrangement();
   const barSec = 240 / Math.max(1, bpm);
+  const stepDur = 60 / Math.max(1, bpm) / 4; // 16th note in seconds
   const defaultClipSec = 8 * barSec;
   const laneRef = useRef<HTMLDivElement | null>(null);
   const hue = 165; // ghost-green family for the drum lane
@@ -791,6 +792,7 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
               steps={clip.steps}
               rowCount={rows.length}
               arrangementDur={arrangementDur}
+              stepDur={stepDur}
               hue={hue}
               selected={clip.id === selectedClipId}
               onSelect={() => { selectClip(clip.id); setOpen(true); }}
@@ -808,7 +810,7 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
 
 function DrumClipBlock({
   clipId, startSec, lengthSec, patternSteps, steps, rowCount,
-  arrangementDur, hue, selected, onSelect, onMove, onResize, onDelete, xToTime,
+  arrangementDur, stepDur, hue, selected, onSelect, onMove, onResize, onDelete, xToTime,
 }: {
   clipId: string;
   startSec: number;
@@ -817,6 +819,7 @@ function DrumClipBlock({
   steps: boolean[][];
   rowCount: number;
   arrangementDur: number;
+  stepDur: number;
   hue: number;
   selected: boolean;
   onSelect: () => void;
@@ -875,8 +878,12 @@ function DrumClipBlock({
     onDelete();
   };
 
-  // Tiny preview: dot per active step, faintly stacked per row.
-  const dotsPerRow = Math.min(patternSteps, 32);
+  // Step preview — render the pattern as it ACTUALLY plays. Pattern
+  // repeats every patternSteps × stepDur seconds, so an 8-bar clip with
+  // a 16-step (1-bar) pattern shows 8 reps × 16 dots; with 32 steps
+  // (2 bars), 4 reps × 32 dots. Only "on" cells render — sparse and
+  // positioned absolutely so width matches the real step duration.
+  const totalSteps = Math.max(1, Math.round(lengthSec / Math.max(stepDur, 1e-6)));
 
   return (
     <div
@@ -894,24 +901,32 @@ function DrumClipBlock({
       }}
       title={`Drum clip — drag to move, right edge to resize, right-click to delete`}
     >
-      {/* Step pattern preview overlaid as faint cells */}
+      {/* Step pattern preview overlaid as cells, repeated across the
+          clip's full length to match what the scheduler actually plays. */}
       <div className="absolute inset-1 flex flex-col gap-[1px] pointer-events-none">
-        {steps.slice(0, Math.max(1, rowCount)).map((rowSteps, rIdx) => (
-          <div key={rIdx} className="flex-1 flex gap-[1px] min-h-0">
-            {Array.from({ length: dotsPerRow }).map((_, sIdx) => {
-              const on = !!rowSteps?.[sIdx];
-              return (
-                <div
-                  key={sIdx}
-                  className="flex-1 rounded-[1px]"
-                  style={{
-                    background: on ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.08)',
-                  }}
-                />
-              );
-            })}
-          </div>
-        ))}
+        {steps.slice(0, Math.max(1, rowCount)).map((rowSteps, rIdx) => {
+          const widthPctEach = 100 / totalSteps;
+          return (
+            <div key={rIdx} className="flex-1 relative min-h-0">
+              {Array.from({ length: totalSteps }).map((_, sIdx) => {
+                const on = !!rowSteps?.[sIdx % patternSteps];
+                if (!on) return null;
+                const leftPct = (sIdx / totalSteps) * 100;
+                return (
+                  <div
+                    key={sIdx}
+                    className="absolute top-0 bottom-0 rounded-[1px]"
+                    style={{
+                      left: `${leftPct}%`,
+                      width: `${Math.max(0.25, widthPctEach - 0.1)}%`,
+                      background: 'rgba(255,255,255,0.85)',
+                    }}
+                  />
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
       {/* Resize handle (right edge) */}
       <div

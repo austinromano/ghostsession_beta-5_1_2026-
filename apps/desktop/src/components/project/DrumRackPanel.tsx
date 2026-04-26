@@ -35,6 +35,13 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
   const selectClip = useDrumRack((s) => s.selectClip);
   const startScheduler = useDrumRack((s) => s.startScheduler);
   const stopScheduler = useDrumRack((s) => s.stopScheduler);
+  const loadForProject = useDrumRack((s) => s.loadForProject);
+
+  // Hydrate per-project drum-rack state on mount (and whenever projectId
+  // flips). Buffers stream in as they decode.
+  useEffect(() => {
+    void loadForProject(projectId);
+  }, [projectId, loadForProject]);
 
   // Start / stop the scheduler whenever the project transport flips.
   const isPlaying = useAudioStore((s) => s.isPlaying);

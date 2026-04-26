@@ -1,9 +1,7 @@
 import { create } from 'zustand';
 import { getCtx, getMaster, safeStop } from './audio/graph';
-import { audioBufferCache } from '../lib/audio';
+import { audioBufferCache, getAudioData } from '../lib/audio';
 import { useAudioStore } from './audioStore';
-
-void audioBufferCache;
 
 // Drum-rack / step-sequencer store.
 //
@@ -68,10 +66,19 @@ interface DrumRackState {
   // Scheduler
   startScheduler: (projectId: string) => void;
   stopScheduler: () => void;
+
+  // Persistence (rows + clips per project; buffers rehydrated from fileId)
+  loadForProject: (projectId: string) => Promise<void>;
 }
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
 const activeSources: Set<AudioBufferSourceNode> = new Set();
+
+// Persistence — rows (without buffer) + clips, keyed by projectId in
+// localStorage. Buffer rehydrated from fileId on load.
+let _currentProjectId: string | null = null;
+let _hydrating = false;
+const persistKey = (projectId: string) => `drumrack::${projectId}`;
 
 function makeRow(): DrumRow {
   return { id: crypto.randomUUID(), name: 'Empty', fileId: null, volume: 1, muted: false };
@@ -278,4 +285,73 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
     for (const src of activeSources) { safeStop(src); }
     activeSources.clear();
   },
+
+  loadForProject: async (projectId: string) => {
+    _currentProjectId = projectId;
+    _hydrating = true;
+    try {
+      const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(persistKey(projectId)) : null;
+      if (raw) {
+        const data = JSON.parse(raw) as { rows: DrumRow[]; clips: DrumClip[]; selectedClipId: string | null };
+        // Strip any stale buffers from the persisted blob; we rehydrate below.
+        const rows = (data.rows || []).map((r) => ({ ...r, buffer: undefined }));
+        const clips = data.clips || [];
+        const selectedClipId = data.selectedClipId ?? null;
+        set({ rows, clips, selectedClipId });
+      } else {
+        // Fresh project — start with 4 empty slots.
+        set({
+          rows: [makeRow(), makeRow(), makeRow(), makeRow()],
+          clips: [],
+          selectedClipId: null,
+        });
+      }
+    } catch {
+      set({
+        rows: [makeRow(), makeRow(), makeRow(), makeRow()],
+        clips: [],
+        selectedClipId: null,
+      });
+    } finally {
+      _hydrating = false;
+    }
+
+    // Rehydrate AudioBuffers from each row's fileId. Done after the
+    // initial set so the panel can render immediately and buffers
+    // stream in as they decode.
+    const rows = get().rows;
+    for (const r of rows) {
+      if (!r.fileId || r.buffer) continue;
+      try {
+        const cached = audioBufferCache.get(r.fileId);
+        const buffer = cached ?? (await getAudioData(projectId, r.fileId)).buffer;
+        set((s) => ({
+          rows: s.rows.map((rr) => (rr.id === r.id ? { ...rr, buffer } : rr)),
+        }));
+      } catch {
+        // file deleted or unavailable — leave row without buffer
+      }
+    }
+  },
 }));
+
+// Auto-save to localStorage on every state change. Skip during the
+// initial hydration window so we don't overwrite the saved blob with
+// the still-empty in-memory defaults.
+useDrumRack.subscribe((state) => {
+  if (_hydrating || !_currentProjectId) return;
+  try {
+    const data = {
+      rows: state.rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        fileId: r.fileId,
+        volume: r.volume,
+        muted: r.muted,
+      })),
+      clips: state.clips,
+      selectedClipId: state.selectedClipId,
+    };
+    localStorage.setItem(persistKey(_currentProjectId), JSON.stringify(data));
+  } catch { /* quota / serialization — ignore */ }
+});
