@@ -22,9 +22,13 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
   const currentProject = useProjectStore((s) => s.currentProject);
 
-  // Show only when there's exactly one selected clip — the panel is for
-  // single-clip detail. Multi-select keeps the inspector dormant.
-  const trackId = selectedTrackIds.size === 1 ? Array.from(selectedTrackIds)[0] : null;
+  // The panel operates on the WHOLE selection. Single click = one clip;
+  // multi-select = same controls apply to every selected clip at once.
+  // First selected acts as the "anchor" for display values; values that
+  // differ across the selection are flagged "Mixed".
+  const ids = useMemo(() => Array.from(selectedTrackIds), [selectedTrackIds]);
+  const trackId = ids[0] || null;
+  const isMulti = ids.length > 1;
 
   const projectTrack = useMemo(() => {
     if (!trackId || !currentProject?.tracks) return null;
@@ -32,6 +36,31 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   }, [trackId, currentProject?.tracks]);
 
   const loaded = trackId ? loadedTracks.get(trackId) : undefined;
+
+  // Compute whether a getter returns the same value across every clip in
+  // the selection. Used to render the "Mixed" hint on controls.
+  const allSameNumber = (g: (t: any) => number | undefined): boolean => {
+    if (!isMulti) return true;
+    let first: number | undefined;
+    let init = false;
+    for (const id of ids) {
+      const v = g(loadedTracks.get(id));
+      if (!init) { first = v; init = true; }
+      else if (v !== first) return false;
+    }
+    return true;
+  };
+  const allSameBool = (g: (t: any) => boolean): boolean => {
+    if (!isMulti) return true;
+    let first: boolean | undefined;
+    let init = false;
+    for (const id of ids) {
+      const v = g(loadedTracks.get(id));
+      if (!init) { first = v; init = true; }
+      else if (v !== first) return false;
+    }
+    return true;
+  };
 
   if (!trackId || !projectTrack) {
     return (
@@ -62,6 +91,22 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
 
   const handlePreview = () => samplePreview.toggle(`clip:${trackId}`);
 
+  // "Mixed" detection per control. When true, the value display shows
+  // a hint that not every selected clip shares the value — but a change
+  // still applies the new value to every clip.
+  const mixedVolume = !allSameNumber((t) => t?.volume);
+  const mixedPitch = !allSameNumber((t) => t?.pitch);
+  const mixedMuted = !allSameBool((t) => !!t?.muted);
+  const mixedWarp = !allSameBool((t) => t?.warp !== false);
+  const mixedBpm = !allSameNumber((t) => t?.bpm || 0);
+
+  // Fan-out helpers — every action runs against every selected clip.
+  const applyVolume = (v: number) => ids.forEach((id) => setTrackVolume(id, v));
+  const applyPitch = (v: number) => ids.forEach((id) => setTrackPitch(id, v));
+  const applyMute = (next: boolean) => ids.forEach((id) => setTrackMuted(id, next));
+  const applyWarp = (next: boolean) => ids.forEach((id) => setTrackWarp(id, next));
+  const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
+
   return (
     <div className="shrink-0 h-[140px] mt-2 rounded-2xl glass flex overflow-hidden">
       {/* Left: file info + metadata pills */}
@@ -74,49 +119,49 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
           >
             <svg width="9" height="9" viewBox="0 0 10 10" fill="currentColor"><polygon points="2,1 9,5 2,9" /></svg>
           </button>
-          <span className="text-[12px] font-semibold text-white/90 truncate" title={fileName}>{fileName}</span>
+          <span className="text-[12px] font-semibold text-white/90 truncate" title={fileName}>
+            {isMulti ? `${ids.length} clips selected` : fileName}
+          </span>
         </div>
         <div className="flex flex-wrap gap-1 items-center">
-          {/* Warp on/off. When off the clip plays native-speed and the
-              drag-release snap reverts to the clip's leading edge — what
-              you want for 808s, hits, FX, or anything where the auto
-              beat-detection would otherwise mis-place the clip. */}
           <button
-            onClick={() => setTrackWarp(trackId, !warp)}
+            onClick={() => applyWarp(!warp)}
             className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider transition-colors"
             style={{
               background: warp ? 'rgba(0,255,200,0.18)' : 'rgba(255,255,255,0.04)',
               color: warp ? '#00FFC8' : 'rgba(255,255,255,0.55)',
               border: `1px solid ${warp ? 'rgba(0,255,200,0.5)' : 'rgba(255,255,255,0.06)'}`,
             }}
-            title={warp ? 'Warp on — sample stretches to project BPM' : 'Warp off — plays at native speed'}
+            title={
+              mixedWarp ? 'Warp differs across selection — click to set all' :
+              warp ? 'Warp on — sample stretches to project BPM' : 'Warp off — plays at native speed'
+            }
           >
-            Warp {warp ? 'On' : 'Off'}
+            Warp {mixedWarp ? '~' : warp ? 'On' : 'Off'}
           </button>
-          {/* Editable BPM box, /2 and ×2. Like Ableton's Warp BPM widget —
-              changes the SOURCE tempo we stretch from, so when the project
-              tempo and sample tempo agree the clip plays at native speed.
-              Disabled when warp is off since the BPM has no effect there. */}
           <BpmEditor
             value={effectiveBpm}
-            onChange={(v) => setTrackBpm(trackId, v)}
+            onChange={(v) => applyBpm(v)}
             isOverride={!!loaded?.bpm && loaded.bpm > 0}
             disabled={!warp}
+            mixed={mixedBpm}
           />
           <Pill icon="time" label={fmtDuration(durationSec)} />
-          {sampleCharacter && (
+          {sampleCharacter && !isMulti && (
             <Pill icon="dot" label={sampleCharacter[0].toUpperCase() + sampleCharacter.slice(1)} />
           )}
         </div>
         <button
-          onClick={() => setTrackMuted(trackId, !muted)}
+          onClick={() => applyMute(!muted)}
           className={`text-[10px] font-semibold uppercase tracking-wider px-2 py-1 rounded transition-colors mt-auto ${
-            muted
-              ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
-              : 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] hover:text-white'
+            mixedMuted
+              ? 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] hover:text-white'
+              : muted
+                ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
+                : 'bg-white/[0.04] text-white/60 hover:bg-white/[0.08] hover:text-white'
           }`}
         >
-          {muted ? 'Muted' : 'Mute'}
+          {mixedMuted ? 'Mute (mixed)' : muted ? 'Muted' : 'Mute'}
         </button>
       </div>
 
@@ -138,27 +183,29 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         <Slider
           label="Vol"
           value={volume}
+          mixed={mixedVolume}
           min={0}
           max={1.5}
           step={0.01}
           format={(v) => `${Math.round(v * 100)}%`}
-          onChange={(v) => setTrackVolume(trackId, v)}
+          onChange={applyVolume}
         />
         <Slider
           label="Pitch"
           value={pitch}
+          mixed={mixedPitch}
           min={PITCH_MIN}
           max={PITCH_MAX}
           step={1}
           format={(v) => `${v >= 0 ? '+' : ''}${v} st`}
-          onChange={(v) => setTrackPitch(trackId, v)}
+          onChange={applyPitch}
         />
       </div>
     </div>
   );
 }
 
-function BpmEditor({ value, onChange, isOverride, disabled }: { value: number; onChange: (v: number) => void; isOverride: boolean; disabled?: boolean }) {
+function BpmEditor({ value, onChange, isOverride, disabled, mixed }: { value: number; onChange: (v: number) => void; isOverride: boolean; disabled?: boolean; mixed?: boolean }) {
   // Local text state so the user can type freely (e.g. backspace through "1"
   // without the field snapping back). Commits on Enter or blur, clamped to
   // a sane musical range. Highlights when the user has overridden the
@@ -185,7 +232,7 @@ function BpmEditor({ value, onChange, isOverride, disabled }: { value: number; o
       <span className="px-1.5 self-center text-ghost-green/80 uppercase tracking-wider text-[9px] font-semibold">BPM</span>
       <input
         type="text"
-        value={draft}
+        value={mixed ? '~' : draft}
         onChange={(e) => setDraft(e.target.value)}
         onKeyDown={(e) => {
           if (e.key === 'Enter') { commit(parseFloat(draft)); (e.target as HTMLInputElement).blur(); }
@@ -228,7 +275,7 @@ function Pill({ icon, label }: { icon: 'bpm' | 'time' | 'dot'; label: string }) 
   );
 }
 
-function Slider({ label, value, min, max, step, format, onChange }: {
+function Slider({ label, value, min, max, step, format, onChange, mixed }: {
   label: string;
   value: number;
   min: number;
@@ -236,12 +283,13 @@ function Slider({ label, value, min, max, step, format, onChange }: {
   step: number;
   format: (v: number) => string;
   onChange: (v: number) => void;
+  mixed?: boolean;
 }) {
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between text-[10px] font-semibold text-white/60">
         <span className="uppercase tracking-wider">{label}</span>
-        <span className="tabular-nums text-white/80">{format(value)}</span>
+        <span className="tabular-nums text-white/80">{mixed ? 'Mixed' : format(value)}</span>
       </div>
       <input
         type="range"
@@ -251,6 +299,7 @@ function Slider({ label, value, min, max, step, format, onChange }: {
         value={value}
         onChange={(e) => onChange(parseFloat(e.target.value))}
         className="w-full accent-ghost-green"
+        style={{ opacity: mixed ? 0.6 : 1 }}
       />
     </div>
   );
