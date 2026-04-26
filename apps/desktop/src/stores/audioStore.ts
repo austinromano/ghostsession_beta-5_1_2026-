@@ -33,6 +33,44 @@ function stretchForProject(
   }
 }
 
+/**
+ * Pitch-preserving playback build. Combines warp stretch + pitch
+ * compensation into ONE pass over the original buffer:
+ *   warpFactor  = sourceBpm / projectBpm (or 1 if warp off / no data)
+ *   pitchFactor = 2^(semitones / 12)
+ *   stretchFactor = warpFactor * pitchFactor
+ *
+ * The buffer ends up `pitchFactor` longer than the warped length; at
+ * playback time the source is run at `playbackRate = pitchFactor` so the
+ * resample shifts the pitch but the OUTPUT duration is just the warped
+ * length again — i.e. pitching down doesn't slow the clip down. Falls
+ * back to the original buffer when the combined factor is too extreme
+ * for WSOLA to handle gracefully.
+ */
+interface PlayBufferResult { buffer: AudioBuffer; playbackRate: number }
+function composePlayBuffer(
+  track: { originalBuffer?: AudioBuffer; bpm?: number; detectedBpm?: number; warp?: boolean; pitch?: number; character?: SampleCharacter; beats?: number[]; buffer: AudioBuffer },
+  projectBpm: number,
+): PlayBufferResult {
+  const pitchFactor = Math.pow(2, (track.pitch || 0) / 12);
+  if (!track.originalBuffer) return { buffer: track.buffer, playbackRate: pitchFactor };
+  const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
+  const warpActive = track.warp !== false && !!sourceBpm && sourceBpm > 0 && projectBpm > 0;
+  const warpFactor = warpActive ? (sourceBpm! / projectBpm) : 1;
+  const stretchFactor = warpFactor * pitchFactor;
+  if (Math.abs(stretchFactor - 1) < 0.005 || stretchFactor < 0.4 || stretchFactor > 2.5) {
+    return { buffer: track.originalBuffer, playbackRate: pitchFactor };
+  }
+  try {
+    const buffer = adaptiveStretch(track.originalBuffer, stretchFactor, getCtx(), {
+      character: track.character, beats: track.beats,
+    });
+    return { buffer, playbackRate: pitchFactor };
+  } catch {
+    return { buffer: track.originalBuffer, playbackRate: pitchFactor };
+  }
+}
+
 export function getAnalyser(): AnalyserNode | null {
   return getAnalyserNode();
 }
@@ -199,13 +237,11 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
       const source = ctx.createBufferSource();
       source.buffer = track.buffer;
-      source.playbackRate.value = 1;
-      // Apply per-track pitch (in semitones, ±12 from the slider) via the
-      // node's detune param. detune is cents, so 1 semitone = 100 cents.
-      // This is "tape" pitch shifting — it changes pitch + speed together,
-      // same as Ableton's Re-Pitch warp mode. Real pitch-only would need
-      // a phase vocoder; we'll add that as a follow-up.
-      try { source.detune.value = (track.pitch || 0) * 100; } catch { /* older browsers */ }
+      // Pitch is applied via playbackRate (resample) BUT the buffer was
+      // pre-stretched by the same factor in composePlayBuffer, so the
+      // OUTPUT duration is preserved — pitching down doesn't slow the
+      // clip down anymore.
+      source.playbackRate.value = Math.pow(2, (track.pitch || 0) / 12);
       source.loop = false;
 
       const gain = ctx.createGain();
@@ -413,10 +449,15 @@ export const useAudioStore = create<AudioState>((set, get) => {
         const initialWarp = existing ? existing.warp : pendingProps?.warp;
         const warp = initialWarp !== false;
         const initialBpm = existing?.bpm || pendingProps?.bpm || 0;
-        const sourceBpm = (initialBpm > 0) ? initialBpm : detectedBpm;
-        const playBuffer = (warp && sourceBpm)
-          ? stretchForProject(buffer, sourceBpm, projBpm, { character, beats })
-          : buffer;
+        const initialPitch = existing?.pitch ?? pendingProps?.pitch ?? 0;
+        // composePlayBuffer combines warp + pitch into one stretch pass so
+        // pitch shifts preserve time at playback (paired with playbackRate
+        // in startAllSources).
+        const { buffer: playBuffer } = composePlayBuffer({
+          originalBuffer: buffer, buffer,
+          bpm: initialBpm, detectedBpm, warp, pitch: initialPitch,
+          character, beats,
+        }, projBpm);
 
         m.set(trackId, {
           id: trackId, buffer: playBuffer, source: null, gainNode: null,
@@ -458,15 +499,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
       let changed = false;
       m.forEach((track, id) => {
         if (!track.originalBuffer) return;
-        const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
-        // Skip when warp is off — clip plays at native speed regardless
-        // of project tempo.
-        const nextBuffer = (track.warp !== false && sourceBpm)
-          ? stretchForProject(
-              track.originalBuffer, sourceBpm, projectBpm,
-              { character: track.character, beats: track.beats },
-            )
-          : track.originalBuffer;
+        const { buffer: nextBuffer } = composePlayBuffer(track, projectBpm);
         if (nextBuffer !== track.buffer) {
           // Stop + disconnect the previous source before we drop the
           // reference — restartIfPlaying below will spin up fresh sources
@@ -485,18 +518,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const track = loadedTracks.get(trackId);
       if (!track) return;
       const m = new Map(loadedTracks);
-      // Re-stretch the playback buffer from the original whenever the user
-      // overrides the source BPM, so the clip immediately reflects the new
-      // tempo against the project. Skipped when warp is off — store the
-      // override but don't touch the buffer. Stop the existing source first
-      // so it doesn't keep playing the old (wrongly-stretched) buffer.
+      // Re-stretch through composePlayBuffer so warp + pitch combine
+      // into one pass. Skipped when warp is off — store the override
+      // but don't touch the buffer. Stop the existing source first so
+      // it doesn't keep playing the old (wrongly-stretched) buffer.
       if (track.warp !== false && track.originalBuffer && projectBpm > 0 && bpm > 0) {
-        const nextBuffer = stretchForProject(
-          track.originalBuffer, bpm, projectBpm,
-          { character: track.character, beats: track.beats },
-        );
         if (track.source) safeStop(track.source);
         if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
+        const { buffer: nextBuffer } = composePlayBuffer({ ...track, bpm }, projectBpm);
         m.set(trackId, { ...track, bpm, buffer: nextBuffer, source: null, gainNode: null });
         set({ loadedTracks: m, bufferVersion: get().bufferVersion + 1 });
       } else {
@@ -513,22 +542,12 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const track = loadedTracks.get(trackId);
       if (!track) return;
       const m = new Map(loadedTracks);
-      // Switching warp regenerates the playback buffer: ON re-stretches
-      // from the original; OFF returns the pristine source so playback is
-      // native speed and beat-aligned snap reverts to clip-leading-edge.
+      // Switching warp regenerates the playback buffer through
+      // composePlayBuffer so warp + pitch always end up combined into
+      // one stretch.
       if (track.source) safeStop(track.source);
       if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
-      let nextBuffer = track.buffer;
-      if (track.originalBuffer) {
-        if (warp) {
-          const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
-          nextBuffer = (sourceBpm && projectBpm > 0)
-            ? stretchForProject(track.originalBuffer, sourceBpm, projectBpm, { character: track.character, beats: track.beats })
-            : track.originalBuffer;
-        } else {
-          nextBuffer = track.originalBuffer;
-        }
-      }
+      const { buffer: nextBuffer } = composePlayBuffer({ ...track, warp }, projectBpm);
       m.set(trackId, { ...track, warp, buffer: nextBuffer, source: null, gainNode: null });
       set({ loadedTracks: m, bufferVersion: get().bufferVersion + 1 });
       restartIfPlaying();
@@ -681,12 +700,22 @@ export const useAudioStore = create<AudioState>((set, get) => {
     },
 
     setTrackPitch: (trackId, semitones) => {
-      const { loadedTracks } = get();
+      const { loadedTracks, projectBpm } = get();
       const track = loadedTracks.get(trackId);
       if (!track) return;
-      track.pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, semitones));
-      set({ loadedTracks: new Map(loadedTracks) });
+      const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, semitones));
+      const m = new Map(loadedTracks);
+      // Rebuild the play buffer so the pitch shift preserves time. The
+      // pitch field is read by composePlayBuffer and combined with the
+      // current warp factor; the resulting buffer is `pitchFactor` longer
+      // than the warped length and gets played at `playbackRate=pitchFactor`.
+      if (track.source) safeStop(track.source);
+      if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
+      const next = composePlayBuffer({ ...track, pitch }, projectBpm);
+      m.set(trackId, { ...track, pitch, buffer: next.buffer, source: null, gainNode: null });
+      set({ loadedTracks: m, bufferVersion: get().bufferVersion + 1 });
       restartIfPlaying();
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
     },
 
     playSoloTrack: (trackId) => {
@@ -701,7 +730,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
       soloSource = ctx.createBufferSource();
       soloSource.buffer = track.buffer;
-      try { soloSource.detune.value = (track.pitch || 0) * 100; } catch { /* older browsers */ }
+      soloSource.playbackRate.value = Math.pow(2, (track.pitch || 0) / 12);
       soloSource.loop = false;
 
       soloGain = ctx.createGain();
@@ -875,36 +904,23 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.muted = clip.muted;
           existing.soloed = clip.soloed;
           existing.pitch = clip.pitch;
-          // Warp toggle: if it changed, regenerate the playback buffer.
+          // Warp / BPM override / pitch can all change in a remote update.
+          // Detect any of them shifting and rebuild the playback buffer
+          // through composePlayBuffer so the combined warp + pitch stretch
+          // is always consistent.
           const incomingWarp = clip.warp !== false;
           const warpChanged = incomingWarp !== (existing.warp !== false);
-          if (warpChanged) {
-            existing.warp = incomingWarp;
-            if (existing.originalBuffer) {
-              if (existing.source) safeStop(existing.source);
-              if (existing.gainNode) { try { existing.gainNode.disconnect(); } catch { /* ignore */ } }
-              const sBpm = (clip.bpm && clip.bpm > 0) ? clip.bpm : (existing.bpm || existing.detectedBpm);
-              existing.buffer = (incomingWarp && sBpm && projectBpm > 0)
-                ? stretchForProject(existing.originalBuffer, sBpm, projectBpm, { character: existing.character, beats: existing.beats })
-                : existing.originalBuffer;
-              existing.source = null;
-              existing.gainNode = null;
-            }
-          }
-          // Manual BPM override: if it changed, re-stretch the playback
-          // buffer from the original so playback matches.
-          if (clip.bpm && clip.bpm > 0 && clip.bpm !== existing.bpm) {
-            existing.bpm = clip.bpm;
-            if (existing.warp !== false && existing.originalBuffer && projectBpm > 0) {
-              if (existing.source) safeStop(existing.source);
-              if (existing.gainNode) { try { existing.gainNode.disconnect(); } catch { /* ignore */ } }
-              existing.buffer = stretchForProject(
-                existing.originalBuffer, clip.bpm, projectBpm,
-                { character: existing.character, beats: existing.beats },
-              );
-              existing.source = null;
-              existing.gainNode = null;
-            }
+          const bpmChanged = !!clip.bpm && clip.bpm > 0 && clip.bpm !== existing.bpm;
+          const pitchChanged = (clip.pitch ?? 0) !== (existing.pitch ?? 0);
+          if (warpChanged) existing.warp = incomingWarp;
+          if (bpmChanged) existing.bpm = clip.bpm;
+          if ((warpChanged || bpmChanged || pitchChanged) && existing.originalBuffer) {
+            if (existing.source) safeStop(existing.source);
+            if (existing.gainNode) { try { existing.gainNode.disconnect(); } catch { /* ignore */ } }
+            const { buffer: nextBuffer } = composePlayBuffer(existing, projectBpm);
+            existing.buffer = nextBuffer;
+            existing.source = null;
+            existing.gainNode = null;
           }
         } else if (clip.parentTrackId) {
           const parentTrack = m.get(clip.parentTrackId);
