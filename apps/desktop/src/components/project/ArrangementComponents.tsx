@@ -950,23 +950,6 @@ function DrumClipBlock({
   const leftPct = (startSec / arrangementDur) * 100;
   const widthPct = Math.max(0.5, (lengthSec / arrangementDur) * 100);
 
-  // Live "active step" for hit flashing — derived from project currentTime
-  // so the clip lights up on each scheduler tick that fires any row.
-  // Returns -1 when nothing should flash (paused, out of range, or step
-  // has no hits across any row).
-  const activeStep = useAudioStore((s) => {
-    if (!s.isPlaying) return -1;
-    const t = s.currentTime;
-    if (t < startSec || t >= startSec + lengthSec) return -1;
-    const absStep = Math.floor((t - startSec) / Math.max(stepDur, 1e-6));
-    const stepIdx = absStep % patternSteps;
-    let any = false;
-    for (let r = 0; r < steps.length; r++) {
-      if (steps[r]?.[stepIdx]) { any = true; break; }
-    }
-    return any ? absStep : -1;
-  });
-
   // Drag (move) on the body. Drag (resize) on the right edge.
   const dragRef = useRef<{ kind: 'move' | 'resize'; startX: number; startStart: number; startLen: number } | null>(null);
 
@@ -1037,19 +1020,6 @@ function DrumClipBlock({
       }}
       title={`Drum clip — drag to move, right edge to resize, right-click to delete`}
     >
-      {/* Hit flash — re-keyed per active absolute step so the keyframe
-          animation restarts and the clip lights up on every scheduler
-          step that fires a row. */}
-      {activeStep >= 0 && (
-        <div
-          key={`hit-${activeStep}`}
-          className="absolute inset-0 rounded pointer-events-none animate-drum-clip-hit"
-          style={{
-            background: `radial-gradient(ellipse at center, hsla(${hue},95%,75%,0.95) 0%, hsla(${hue},90%,60%,0.55) 60%, transparent 100%)`,
-            mixBlendMode: 'screen',
-          }}
-        />
-      )}
       {/* Step pattern preview overlaid as cells, repeated across the
           clip's full length to match what the scheduler actually plays. */}
       <div className="absolute inset-1 flex flex-col gap-[1px] pointer-events-none">
