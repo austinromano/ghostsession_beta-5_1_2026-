@@ -382,6 +382,11 @@ function LaneClip({ track, selectedProjectId, deleteTrack, trackZoom, laneWidth,
   const beatAlignOffset = useAudioStore((s) => {
     const t = s.loadedTracks.get(track.id);
     if (!t?.firstBeatOffset || !t.originalBuffer) return 0;
+    // When warp is off, snap by the clip's leading edge — beat detection
+    // is unreliable on samples we wouldn't warp anyway (808s, hits, FX),
+    // and forcing a phantom-beat offset there is what stops them from
+    // landing on bar lines.
+    if (t.warp === false) return 0;
     const factor = t.originalBuffer.duration > 0 ? t.buffer.duration / t.originalBuffer.duration : 1;
     return t.firstBeatOffset * factor;
   });

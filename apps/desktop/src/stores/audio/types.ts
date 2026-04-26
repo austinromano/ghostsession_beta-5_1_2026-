@@ -22,6 +22,10 @@ export interface LoadedTrack {
   firstBeatOffset?: number;     // seconds from start of ORIGINAL buffer to first detected beat
   beats?: number[];             // onset timestamps in ORIGINAL buffer time — drives transient-preserving stretch
   character?: 'percussive' | 'tonal' | 'mixed' | 'ambient'; // drives algorithm selection
+  // Warp on/off. true = stretch to project BPM and snap by first detected
+  // beat. false = play native and snap by clip leading edge — what 808s,
+  // hits, FX, and any sample with bad BPM detection actually want.
+  warp: boolean;
 }
 
 export interface UndoSnapshot {
@@ -43,6 +47,9 @@ export interface ArrangementClipState {
   // detectedBpm for stretch calculations. Lets the user correct a wrong
   // detection or halve / double the tempo.
   bpm?: number;
+  // Whether warp/stretch is active. Undefined ≡ true (default) so old
+  // arrangement blobs without this field keep behaving the same.
+  warp?: boolean;
   parentTrackId?: string;
   parentFileId?: string;
 }

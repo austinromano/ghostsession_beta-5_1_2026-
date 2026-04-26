@@ -19,6 +19,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackMuted = useAudioStore((s) => s.setTrackMuted);
   const setTrackPitch = useAudioStore((s) => s.setTrackPitch);
   const setTrackBpm = useAudioStore((s) => s.setTrackBpm);
+  const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // Show only when there's exactly one selected clip — the panel is for
@@ -47,6 +48,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const volume = loaded?.volume ?? 1;
   const pitch = loaded?.pitch ?? 0;
   const muted = loaded?.muted ?? false;
+  const warp = loaded?.warp !== false;
   // Manual BPM override (loaded.bpm). Falls back to the file's detected
   // BPM so the box always shows the value currently driving the stretch.
   const effectiveBpm = (loaded?.bpm && loaded.bpm > 0) ? loaded.bpm : (detectedBpm ?? 120);
@@ -75,13 +77,31 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
           <span className="text-[12px] font-semibold text-white/90 truncate" title={fileName}>{fileName}</span>
         </div>
         <div className="flex flex-wrap gap-1 items-center">
+          {/* Warp on/off. When off the clip plays native-speed and the
+              drag-release snap reverts to the clip's leading edge — what
+              you want for 808s, hits, FX, or anything where the auto
+              beat-detection would otherwise mis-place the clip. */}
+          <button
+            onClick={() => setTrackWarp(trackId, !warp)}
+            className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider transition-colors"
+            style={{
+              background: warp ? 'rgba(0,255,200,0.18)' : 'rgba(255,255,255,0.04)',
+              color: warp ? '#00FFC8' : 'rgba(255,255,255,0.55)',
+              border: `1px solid ${warp ? 'rgba(0,255,200,0.5)' : 'rgba(255,255,255,0.06)'}`,
+            }}
+            title={warp ? 'Warp on — sample stretches to project BPM' : 'Warp off — plays at native speed'}
+          >
+            Warp {warp ? 'On' : 'Off'}
+          </button>
           {/* Editable BPM box, /2 and ×2. Like Ableton's Warp BPM widget —
               changes the SOURCE tempo we stretch from, so when the project
-              tempo and sample tempo agree the clip plays at native speed. */}
+              tempo and sample tempo agree the clip plays at native speed.
+              Disabled when warp is off since the BPM has no effect there. */}
           <BpmEditor
             value={effectiveBpm}
             onChange={(v) => setTrackBpm(trackId, v)}
             isOverride={!!loaded?.bpm && loaded.bpm > 0}
+            disabled={!warp}
           />
           <Pill icon="time" label={fmtDuration(durationSec)} />
           {sampleCharacter && (
@@ -138,7 +158,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   );
 }
 
-function BpmEditor({ value, onChange, isOverride }: { value: number; onChange: (v: number) => void; isOverride: boolean }) {
+function BpmEditor({ value, onChange, isOverride, disabled }: { value: number; onChange: (v: number) => void; isOverride: boolean; disabled?: boolean }) {
   // Local text state so the user can type freely (e.g. backspace through "1"
   // without the field snapping back). Commits on Enter or blur, clamped to
   // a sane musical range. Highlights when the user has overridden the
@@ -158,6 +178,8 @@ function BpmEditor({ value, onChange, isOverride }: { value: number; onChange: (
       style={{
         background: 'rgba(255,255,255,0.04)',
         border: `1px solid ${isOverride ? 'rgba(0,255,200,0.45)' : 'rgba(255,255,255,0.06)'}`,
+        opacity: disabled ? 0.4 : 1,
+        pointerEvents: disabled ? 'none' : undefined,
       }}
     >
       <span className="px-1.5 self-center text-ghost-green/80 uppercase tracking-wider text-[9px] font-semibold">BPM</span>
