@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { getCtx, getMaster, safeStop } from './audio/graph';
 import { audioBufferCache, getAudioData } from '../lib/audio';
 import { useAudioStore } from './audioStore';
+import { sendSessionAction } from '../lib/socket';
 
 // Drum-rack / step-sequencer store.
 //
@@ -69,6 +70,9 @@ interface DrumRackState {
 
   // Persistence (rows + clips per project; buffers rehydrated from fileId)
   loadForProject: (projectId: string) => Promise<void>;
+
+  // Multiplayer sync — apply a snapshot received over the socket.
+  applyRemoteState: (payload: { rows: Array<{ id: string; name: string; fileId: string | null; volume: number; muted: boolean }>; clips: DrumClip[] }) => Promise<void>;
 }
 
 let schedulerTimer: ReturnType<typeof setInterval> | null = null;
@@ -76,9 +80,47 @@ const activeSources: Set<AudioBufferSourceNode> = new Set();
 
 // Persistence — rows (without buffer) + clips, keyed by projectId in
 // localStorage. Buffer rehydrated from fileId on load.
+//
+// Real-time multiplayer: same payload is also broadcast over the project
+// socket room as a `drum.state` session-action so every collaborator
+// sees rows/clips/steps live. _applyingRemote suppresses echoes.
 let _currentProjectId: string | null = null;
 let _hydrating = false;
+let _applyingRemote = false;
+let _lastBroadcastJson = '';
 const persistKey = (projectId: string) => `drumrack::${projectId}`;
+
+interface DrumSyncPayload {
+  rows: Array<{ id: string; name: string; fileId: string | null; volume: number; muted: boolean }>;
+  clips: DrumClip[];
+}
+
+function buildSyncPayload(rows: DrumRow[], clips: DrumClip[]): DrumSyncPayload {
+  return {
+    rows: rows.map((r) => ({
+      id: r.id,
+      name: r.name,
+      fileId: r.fileId,
+      volume: r.volume,
+      muted: r.muted,
+    })),
+    clips,
+  };
+}
+
+function payloadHasContent(p: DrumSyncPayload): boolean {
+  if (p.clips.length > 0) return true;
+  return p.rows.some((r) => !!r.fileId);
+}
+
+// Called by sessionStore when a peer sends `drum.request-state`. We only
+// reply if our state has anything worth sharing — avoids clobbering a
+// late joiner whose populated localStorage just loaded in.
+export function getDrumSyncSnapshot(): DrumSyncPayload | null {
+  const s = useDrumRack.getState();
+  const payload = buildSyncPayload(s.rows, s.clips);
+  return payloadHasContent(payload) ? payload : null;
+}
 
 function makeRow(): DrumRow {
   return { id: crypto.randomUUID(), name: 'Empty', fileId: null, volume: 1, muted: false };
@@ -333,25 +375,81 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       }
     }
   },
-}));
 
-// Auto-save to localStorage on every state change. Skip during the
-// initial hydration window so we don't overwrite the saved blob with
-// the still-empty in-memory defaults.
-useDrumRack.subscribe((state) => {
-  if (_hydrating || !_currentProjectId) return;
-  try {
-    const data = {
-      rows: state.rows.map((r) => ({
+  applyRemoteState: async (payload) => {
+    if (!payload || !Array.isArray(payload.rows) || !Array.isArray(payload.clips)) return;
+    const projectId = _currentProjectId;
+    _applyingRemote = true;
+    try {
+      // Reuse cached AudioBuffers from any existing row with the same
+      // fileId so we don't re-decode every time a peer broadcasts.
+      const prevRows = get().rows;
+      const fileIdToBuffer = new Map<string, AudioBuffer>();
+      for (const r of prevRows) {
+        if (r.fileId && r.buffer) fileIdToBuffer.set(r.fileId, r.buffer);
+      }
+      const rows: DrumRow[] = payload.rows.map((r) => ({
         id: r.id,
         name: r.name,
         fileId: r.fileId,
         volume: r.volume,
         muted: r.muted,
-      })),
-      clips: state.clips,
-      selectedClipId: state.selectedClipId,
-    };
-    localStorage.setItem(persistKey(_currentProjectId), JSON.stringify(data));
+        buffer: r.fileId ? fileIdToBuffer.get(r.fileId) : undefined,
+      }));
+      set((s) => ({
+        rows,
+        clips: payload.clips,
+        // Keep selection local — collaborators have their own panel focus.
+        selectedClipId: s.selectedClipId,
+      }));
+    } finally {
+      _applyingRemote = false;
+    }
+
+    // Fetch any buffers we don't already have for this project.
+    if (!projectId) return;
+    const rows = get().rows;
+    for (const r of rows) {
+      if (!r.fileId || r.buffer) continue;
+      try {
+        const cached = audioBufferCache.get(r.fileId);
+        const buffer = cached ?? (await getAudioData(projectId, r.fileId)).buffer;
+        _applyingRemote = true;
+        try {
+          set((s) => ({
+            rows: s.rows.map((rr) => (rr.id === r.id ? { ...rr, buffer } : rr)),
+          }));
+        } finally {
+          _applyingRemote = false;
+        }
+      } catch {
+        // file unavailable
+      }
+    }
+  },
+}));
+
+// On every state change: persist locally AND broadcast to the room.
+// Skipped during initial hydration so we don't overwrite saved state
+// with empty defaults; skipped while applying a remote snapshot so we
+// don't echo it straight back at the sender.
+useDrumRack.subscribe((state) => {
+  if (_hydrating || !_currentProjectId) return;
+
+  const payload = buildSyncPayload(state.rows, state.clips);
+  const json = JSON.stringify(payload);
+
+  // localStorage save (also stores selectedClipId for own-session restore).
+  try {
+    const persisted = { ...payload, selectedClipId: state.selectedClipId };
+    localStorage.setItem(persistKey(_currentProjectId), JSON.stringify(persisted));
   } catch { /* quota / serialization — ignore */ }
+
+  // Real-time broadcast — skip echoes and identical snapshots.
+  if (_applyingRemote) return;
+  if (json === _lastBroadcastJson) return;
+  _lastBroadcastJson = json;
+  try {
+    sendSessionAction(_currentProjectId, { type: 'drum.state', payload });
+  } catch { /* socket may not be connected */ }
 });

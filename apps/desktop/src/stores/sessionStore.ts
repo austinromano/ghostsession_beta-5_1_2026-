@@ -4,6 +4,7 @@ import { getSocket, joinProject, leaveProject, sendChat, sendSessionAction, dele
 import { api } from '../lib/api';
 import { useAuthStore } from './authStore';
 import { useProjectStore } from './projectStore';
+import { useDrumRack, getDrumSyncSnapshot } from './drumRackStore';
 
 interface SessionState {
   isConnected: boolean;
@@ -46,6 +47,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     socket.off('delete-chat-message');
     socket.off('project-updated');
     socket.off('cursor-move');
+    socket.off('session-action');
 
     joinProject(projectId);
     set({ currentProjectId: projectId, isConnected: true });
@@ -128,6 +130,23 @@ export const useSessionStore = create<SessionState>((set, get) => ({
       }
     });
 
+    // Multiplayer drum-rack: drum.state snapshots flow through the generic
+    // session-action envelope. drum.request-state lets a fresh joiner ask
+    // the room for the current rack so they don't start blank.
+    socket.on('session-action', ({ action }) => {
+      const a = action as { type?: string; payload?: any } | undefined;
+      if (!a || typeof a.type !== 'string') return;
+      if (a.type === 'drum.state' && a.payload) {
+        void useDrumRack.getState().applyRemoteState(a.payload);
+      } else if (a.type === 'drum.request-state') {
+        const snap = getDrumSyncSnapshot();
+        const pid = get().currentProjectId;
+        if (snap && pid) {
+          sendSessionAction(pid, { type: 'drum.state', payload: snap });
+        }
+      }
+    });
+
     // Lightweight arrangement patch — avoid the full project refetch. Just
     // splice the new blob into currentProject so TransportBar's live-sync
     // effect picks it up and applies it.
@@ -184,6 +203,7 @@ export const useSessionStore = create<SessionState>((set, get) => ({
     socket?.off('delete-chat-message');
     socket?.off('project-updated');
     socket?.off('cursor-move');
+    socket?.off('session-action');
 
     set({ currentProjectId: null, isConnected: false, onlineUsers: [], chatMessages: [], remoteCursors: new Map() });
   },

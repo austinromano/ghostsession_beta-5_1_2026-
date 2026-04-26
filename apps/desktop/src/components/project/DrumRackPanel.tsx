@@ -4,6 +4,7 @@ import { useAudioStore } from '../../stores/audioStore';
 import { audioBufferCache, getAudioData } from '../../lib/audio';
 import { api } from '../../lib/api';
 import { getCtx } from '../../stores/audio/graph';
+import { sendSessionAction } from '../../lib/socket';
 import { SAMPLE_LIBRARY_DRAG_MIME } from '../layout/SampleLibrarySection';
 
 // Drum-rack / step-sequencer panel. Lives at the bottom of the
@@ -38,9 +39,17 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
   const loadForProject = useDrumRack((s) => s.loadForProject);
 
   // Hydrate per-project drum-rack state on mount (and whenever projectId
-  // flips). Buffers stream in as they decode.
+  // flips). Buffers stream in as they decode. After local hydrate, ask
+  // the room for the current shared snapshot — peers reply only if they
+  // have content, so a lone user keeps their localStorage intact.
   useEffect(() => {
-    void loadForProject(projectId);
+    let cancelled = false;
+    (async () => {
+      await loadForProject(projectId);
+      if (cancelled) return;
+      try { sendSessionAction(projectId, { type: 'drum.request-state' }); } catch { /* socket may not be ready */ }
+    })();
+    return () => { cancelled = true; };
   }, [projectId, loadForProject]);
 
   // Start / stop the scheduler whenever the project transport flips.
