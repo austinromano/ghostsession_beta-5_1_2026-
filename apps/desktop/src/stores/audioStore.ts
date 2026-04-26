@@ -184,6 +184,12 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const source = ctx.createBufferSource();
       source.buffer = track.buffer;
       source.playbackRate.value = 1;
+      // Apply per-track pitch (in semitones, ±12 from the slider) via the
+      // node's detune param. detune is cents, so 1 semitone = 100 cents.
+      // This is "tape" pitch shifting — it changes pitch + speed together,
+      // same as Ableton's Re-Pitch warp mode. Real pitch-only would need
+      // a phase vocoder; we'll add that as a follow-up.
+      try { source.detune.value = (track.pitch || 0) * 100; } catch { /* older browsers */ }
       source.loop = false;
 
       const gain = ctx.createGain();
@@ -670,6 +676,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
       soloSource = ctx.createBufferSource();
       soloSource.buffer = track.buffer;
+      try { soloSource.detune.value = (track.pitch || 0) * 100; } catch { /* older browsers */ }
       soloSource.loop = false;
 
       soloGain = ctx.createGain();
