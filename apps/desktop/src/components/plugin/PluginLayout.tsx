@@ -113,6 +113,42 @@ function GridSnapPicker() {
   );
 }
 
+// Undo / redo pair that lives next to the zoom buttons in the arrangement
+// toolbar. Wired straight to audioStore.undo / .redo and greyed out when
+// their stack is empty.
+function UndoRedoButtons() {
+  const undo = useAudioStore((s) => s.undo);
+  const redo = useAudioStore((s) => s.redo);
+  const canUndo = useAudioStore((s) => s.canUndo);
+  const canRedo = useAudioStore((s) => s.canRedo);
+  return (
+    <>
+      <button
+        onClick={() => { if (canUndo) undo(); }}
+        disabled={!canUndo}
+        className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${canUndo ? 'text-white/40 hover:text-white' : 'text-white/15 cursor-not-allowed'}`}
+        title="Undo"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="1 4 1 10 7 10" />
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+        </svg>
+      </button>
+      <button
+        onClick={() => { if (canRedo) redo(); }}
+        disabled={!canRedo}
+        className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${canRedo ? 'text-white/40 hover:text-white' : 'text-white/15 cursor-not-allowed'}`}
+        title="Redo"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="23 4 23 10 17 10" />
+          <path d="M20.49 15a9 9 0 1 1-2.13-9.36L23 10" />
+        </svg>
+      </button>
+    </>
+  );
+}
+
 function DockButton({ title, active, onClick, children }: { title: string; active: boolean; onClick: () => void; children: React.ReactNode }) {
   return (
     <motion.button
@@ -779,6 +815,11 @@ export default function PluginLayout() {
                               )}
                             />
                             <div className="flex items-center gap-1 py-1 justify-end">
+                              {/* Undo / Redo — wired to audioStore. canUndo /
+                                  canRedo come from the same store so the
+                                  buttons grey out when their stack is empty. */}
+                              <UndoRedoButtons />
+                              <span className="w-px h-4 bg-white/[0.08] mx-0.5" />
                               <button
                                 onClick={() => setTrackZoom('half')}
                                 className={`w-6 h-6 flex items-center justify-center rounded transition-colors ${trackZoom === 'half' ? 'text-ghost-green' : 'text-white/30 hover:text-white/60'}`}
