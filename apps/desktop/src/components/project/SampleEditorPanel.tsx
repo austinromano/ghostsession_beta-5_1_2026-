@@ -358,16 +358,31 @@ function WarpMarkerOverlay({ trackId, beats }: { trackId: string; beats: number[
     return ((b - trimStart) / (effectiveTrimEnd - trimStart)) * 100;
   };
 
+  // Add a new warp marker at a given source position. Default bufferSec
+  // anchors the marker to its current global-stretch position so the
+  // first frame plays unchanged — drag the marker to actually warp.
+  const addMarkerAtSource = (sourceTime: number) => {
+    // Don't double-up if a marker is already here within ~5 ms.
+    if (warpMarkers.some((m) => Math.abs(m.sourceSec - sourceTime) < 0.005)) return;
+    setTrackWarpMarkers(trackId, [...warpMarkers, { sourceSec: sourceTime, bufferSec: sourceTime * stretchRatio }]);
+  };
+
   const onHeaderContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
     e.preventDefault();
     if ((e.target as HTMLElement).closest('[data-warp-marker]')) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const pct = (e.clientX - rect.left) / rect.width;
     const bufTime = trimStart + pct * (effectiveTrimEnd - trimStart);
-    // New marker plays the same as the global stretch: bufferSec
-    // = sourceSec * stretchRatio. Drag later changes bufferSec only.
-    const sourceTime = bufTime / Math.max(0.0001, stretchRatio);
-    setTrackWarpMarkers(trackId, [...warpMarkers, { sourceSec: sourceTime, bufferSec: bufTime }]);
+    addMarkerAtSource(bufTime / Math.max(0.0001, stretchRatio));
+  };
+
+  const onHeaderDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if ((e.target as HTMLElement).closest('[data-warp-marker]')) return;
+    if ((e.target as HTMLElement).closest('[data-transient-marker]')) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const bufTime = trimStart + pct * (effectiveTrimEnd - trimStart);
+    addMarkerAtSource(bufTime / Math.max(0.0001, stretchRatio));
   };
 
   const onMarkerPointerDown = (idx: number) => (e: React.PointerEvent<HTMLDivElement>) => {
@@ -405,14 +420,20 @@ function WarpMarkerOverlay({ trackId, beats }: { trackId: string; beats: number[
 
   return (
     <>
-      {/* Top header strip — receives right-click to add a new marker. */}
+      {/* Top header strip — double-click empty space to add a warp
+          marker; right-click also works (kept for parity with the
+          rest of the editor). */}
       <div
         className="absolute top-0 left-0 right-0 cursor-crosshair"
-        style={{ height: 10 }}
+        style={{ height: 12 }}
         onContextMenu={onHeaderContextMenu}
-        title="Right-click to add a warp marker"
+        onDoubleClick={onHeaderDoubleClick}
+        title="Double-click to add a warp marker"
       />
-      {/* Transient markers — non-interactive, gray downward triangles */}
+      {/* Transient markers — gray downward triangles. Double-click
+          converts a transient into a draggable warp marker, just like
+          Ableton. The hit zone extends past the visible triangle so
+          they're easy to click on a small waveform. */}
       {beats.map((beatSec, i) => {
         const bufTime = sourceToBufferTime(beatSec);
         const pct = bufTimeToPct(bufTime);
@@ -420,16 +441,25 @@ function WarpMarkerOverlay({ trackId, beats }: { trackId: string; beats: number[
         return (
           <div
             key={`tr-${i}`}
-            className="absolute top-0 pointer-events-none"
-            style={{
-              left: `calc(${pct}% - 3px)`,
-              width: 6,
-              height: 6,
-              borderLeft: '3px solid transparent',
-              borderRight: '3px solid transparent',
-              borderTop: '5px solid rgba(255,255,255,0.35)',
-            }}
-          />
+            data-transient-marker
+            onDoubleClick={(e) => { e.stopPropagation(); addMarkerAtSource(beatSec); }}
+            className="absolute top-0 cursor-pointer"
+            style={{ left: `calc(${pct}% - 6px)`, width: 12, height: 12 }}
+            title="Double-click to convert to warp marker"
+          >
+            <div
+              className="absolute pointer-events-none"
+              style={{
+                left: 3,
+                top: 0,
+                width: 0,
+                height: 0,
+                borderLeft: '3px solid transparent',
+                borderRight: '3px solid transparent',
+                borderTop: '5px solid rgba(255,255,255,0.4)',
+              }}
+            />
+          </div>
         );
       })}
       {/* User warp markers — gold draggable triangles + a thin gold line
