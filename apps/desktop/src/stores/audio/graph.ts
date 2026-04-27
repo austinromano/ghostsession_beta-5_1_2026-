@@ -83,8 +83,12 @@ export function getMasterFader(): GainNode {
   return masterGain!;
 }
 
-export function getAnalyser(): AnalyserNode | null {
-  return masterAnalyser;
+export function getAnalyser(): AnalyserNode {
+  // Force init so the master meter has something to tap even before the
+  // first track loads — otherwise the meter mounts, sees `null`, bails
+  // out, and never paints a single frame.
+  if (!masterAnalyser) init();
+  return masterAnalyser!;
 }
 
 export function safeStop(source: AudioBufferSourceNode | null) {
