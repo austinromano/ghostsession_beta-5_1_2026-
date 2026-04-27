@@ -41,15 +41,20 @@ export interface DrumClip {
 interface DrumRackState {
   open: boolean;
   // Expand the drum-rack lane in the arrangement so each row gets its
-  // own sub-lane showing just that row's hits. Pure UI state — not
-  // persisted, not synced.
+  // own sub-lane showing just that row's hits.
   expanded: boolean;
+  // When `expanded`, render each per-row sub-lane at the SAME height as
+  // a regular audio track lane instead of the compact 24 px sub-lane
+  // height. Lets the user see drum hits at full visual scale alongside
+  // the rest of the arrangement.
+  tallRows: boolean;
   rows: DrumRow[];
   clips: DrumClip[];
   selectedClipId: string | null;
 
   setOpen: (v: boolean) => void;
   setExpanded: (v: boolean) => void;
+  setTallRows: (v: boolean) => void;
 
   // Row-level (samples / mix)
   addEmptyRow: () => void;
@@ -138,12 +143,14 @@ function emptySteps(rowCount: number, patternSteps: number): boolean[][] {
 export const useDrumRack = create<DrumRackState>((set, get) => ({
   open: false,
   expanded: false,
+  tallRows: false,
   rows: [makeRow(), makeRow(), makeRow(), makeRow()],
   clips: [],
   selectedClipId: null,
 
   setOpen: (v) => set({ open: v }),
   setExpanded: (v) => set({ expanded: v }),
+  setTallRows: (v) => set({ tallRows: v }),
 
   addEmptyRow: () => set((s) => ({
     rows: [...s.rows, makeRow()],
@@ -343,9 +350,10 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       if (raw) {
         const data = JSON.parse(raw) as {
           rows: DrumRow[]; clips: DrumClip[]; selectedClipId: string | null;
-          // UI state — open + expanded restore the panel exactly as the
-          // user left it on their last visit so the editor stays "warm".
-          open?: boolean; expanded?: boolean;
+          // UI state — open + expanded + tallRows restore the panel
+          // exactly as the user left it on their last visit so the editor
+          // stays "warm".
+          open?: boolean; expanded?: boolean; tallRows?: boolean;
         };
         const rows = (data.rows || []).map((r) => ({ ...r, buffer: undefined }));
         const clips = data.clips || [];
@@ -354,6 +362,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
           rows, clips, selectedClipId,
           open: data.open ?? false,
           expanded: data.expanded ?? false,
+          tallRows: data.tallRows ?? false,
         });
       } else {
         // Fresh project — start with 4 empty slots and the panel closed.
@@ -363,6 +372,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
           selectedClipId: null,
           open: false,
           expanded: false,
+          tallRows: false,
         });
       }
     } catch {
@@ -372,6 +382,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         selectedClipId: null,
         open: false,
         expanded: false,
+        tallRows: false,
       });
     } finally {
       _hydrating = false;
@@ -487,6 +498,7 @@ useDrumRack.subscribe((state) => {
       selectedClipId: state.selectedClipId,
       open: state.open,
       expanded: state.expanded,
+      tallRows: state.tallRows,
     };
     localStorage.setItem(persistKey(_currentProjectId), JSON.stringify(persisted));
   } catch { /* quota / serialization — ignore */ }

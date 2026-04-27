@@ -950,6 +950,8 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
   const selectedClipId = useDrumRack((s) => s.selectedClipId);
   const expanded = useDrumRack((s) => s.expanded);
   const setExpanded = useDrumRack((s) => s.setExpanded);
+  const tallRows = useDrumRack((s) => s.tallRows);
+  const setTallRows = useDrumRack((s) => s.setTallRows);
   const selectClip = useDrumRack((s) => s.selectClip);
   const createClipAt = useDrumRack((s) => s.createClipAt);
   const moveClip = useDrumRack((s) => s.moveClip);
@@ -1024,6 +1026,23 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
+          {/* Tall-rows toggle — only meaningful while the rack is
+              expanded. Renders the per-row sub-lanes at the same height
+              as a regular audio track instead of the compact 24 px
+              default. */}
+          {expanded && (
+            <button
+              onClick={(e) => { e.stopPropagation(); setTallRows(!tallRows); }}
+              className={`absolute left-6 bottom-1 w-4 h-4 rounded flex items-center justify-center transition-colors z-10 ${tallRows ? 'bg-ghost-purple/60 text-white' : 'bg-black/30 hover:bg-black/50 text-white/85'}`}
+              title={tallRows ? 'Shrink drum row lanes back to compact height' : 'Expand drum row lanes to full track height'}
+            >
+              <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="8 7 12 3 16 7" />
+                <polyline points="8 17 12 21 16 17" />
+                <line x1="12" y1="3" x2="12" y2="21" />
+              </svg>
+            </button>
+          )}
         </div>
         <div
           ref={laneRef}
@@ -1067,6 +1086,7 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
           clips={clips}
           arrangementDur={arrangementDur}
           stepDur={stepDur}
+          subLaneHeight={tallRows ? laneHeight : 24}
         />
       ))}
     </Reorder.Item>
@@ -1077,15 +1097,17 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
    the hits for this single row across every clip — the kick lane shows
    kick hits, the snare lane shows snare hits, etc. Read-only for now;
    editing happens in the rack panel below. */
-function DrumRowLane({ row, rowIdx, rowHue, clips, arrangementDur, stepDur }: {
+function DrumRowLane({ row, rowIdx, rowHue, clips, arrangementDur, stepDur, subLaneHeight = 24 }: {
   row: { id: string; name: string; muted: boolean };
   rowIdx: number;
   rowHue: number;
   clips: Array<{ id: string; startSec: number; lengthSec: number; patternSteps: number; steps: boolean[][] }>;
   arrangementDur: number;
   stepDur: number;
+  // 24 px = compact default; passed at full track-lane height when the
+  // drum-rack tall-rows toggle is on.
+  subLaneHeight?: number;
 }) {
-  const subLaneHeight = 24;
   return (
     <div className="flex" style={{ height: subLaneHeight }}>
       <div data-track-header className="h-full flex shrink-0">
