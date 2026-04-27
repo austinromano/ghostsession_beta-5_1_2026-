@@ -1,20 +1,27 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { api } from '../../lib/api';
 import { useAudioStore } from '../../stores/audioStore';
 import { audioBufferCache } from '../../lib/audio';
 import Waveform from '../tracks/Waveform';
+import {
+  BarRuler,
+  BarGridOverlay,
+  ArrangementPlayhead,
+  TRACK_HEADER_WIDTH,
+  useArrangement,
+} from '../project/ArrangementComponents';
 import type { ProjectDetail } from '@ghost/types';
 
 /**
- * Read-only project viewer at /p/<token>. No auth needed — anyone with the
- * link can play the project. Strips every editor affordance (drag, trim,
- * upload, chat, presence) and shows just the bare minimum: project name,
- * one big play/pause control, and a vertical stack of waveforms positioned
- * by their arrangement startOffset.
+ * Read-only project viewer at /p/<token>. Mirrors the editor's arrangement
+ * layout (bar ruler, lane grid, playhead) so the recipient sees what the
+ * owner actually built — not a stripped-down summary. Editing affordances
+ * (drag, trim, mute, context menus, drum-rack editor) are absent.
  *
- * The Figma-style "viral" wedge: send a link, the recipient hears the
- * project in their browser before they've opened an account.
+ * Reuses BarRuler / BarGridOverlay / ArrangementPlayhead from the editor.
+ * Each are pure store-read components — they work fine without auth or
+ * sockets, and any seek-to-click in BarRuler just scrubs local playback.
  */
 export default function PublicProjectViewer({ token }: { token: string }) {
   const [project, setProject] = useState<ProjectDetail | null>(null);
@@ -43,11 +50,10 @@ export default function PublicProjectViewer({ token }: { token: string }) {
     return () => { cancelled = true; };
   }, [token]);
 
-  // Once the project + track list arrive: set the BPM, fetch every audio
-  // file via the public token endpoint, decode each, and hand to the audio
-  // store via loadTrackFromBuffer (the same path the editor uses for
-  // duplicated/split clips). Then apply the saved arrangement so each clip
-  // sits at its right startOffset / trimStart / trimEnd.
+  // Once project + track list arrive: set BPM, fetch every audio file via
+  // the public token endpoint, decode each, and hand to the audio store
+  // via loadTrackFromBuffer. Then apply the saved arrangementJson so each
+  // clip sits at its right startOffset / trimStart / trimEnd / volume.
   useEffect(() => {
     if (!project) return;
     let cancelled = false;
@@ -64,10 +70,9 @@ export default function PublicProjectViewer({ token }: { token: string }) {
         const tempCtx = new AudioContext();
         const buffer = await tempCtx.decodeAudioData(arrayBuffer.slice(0));
         await tempCtx.close();
-        // Cache the decoded buffer so re-renders don't re-decode. Don't pass
-        // fileId to Waveform downstream — without an auth token it can't
-        // hit the peaks/decode endpoints, but it'll happily derive raw
-        // samples from `loadedTracks[id].buffer` when fileId is omitted.
+        // Cache so re-renders don't re-decode. fileId is omitted on the
+        // <Waveform> below so the auth'd peaks/decode endpoints are never
+        // hit; the waveform derives raw samples from loadedTracks.buffer.
         audioBufferCache.set(t.fileId, buffer);
         if (cancelled) return;
         audioStore.loadTrackFromBuffer(
@@ -82,7 +87,6 @@ export default function PublicProjectViewer({ token }: { token: string }) {
       }
     })).then(() => {
       if (cancelled) return;
-      // Apply arrangement positions/trim/volume from the persisted blob.
       const arrJson = (project as any).arrangementJson;
       if (arrJson) {
         try {
@@ -97,7 +101,6 @@ export default function PublicProjectViewer({ token }: { token: string }) {
 
     return () => {
       cancelled = true;
-      // Stop any audio when leaving the viewer.
       try { audioStore.stop(); } catch { /* ignore */ }
     };
   }, [project, token]);
@@ -115,14 +118,7 @@ export default function PublicProjectViewer({ token }: { token: string }) {
     return `${m}:${sec.toString().padStart(2, '0')}`;
   };
 
-  const audioTracks = useMemo(
-    () => (project?.tracks || []).filter((t: any) => t.fileId),
-    [project],
-  );
-
-  // Map every clip onto a normalized 0–1 timeline. Padding at the right so
-  // the longest clip doesn't sit flush against the edge.
-  const timelineEnd = duration > 0 ? duration : 1;
+  const audioTracks = (project?.tracks || []).filter((t: any) => t.fileId);
 
   if (loading) {
     return (
@@ -149,7 +145,7 @@ export default function PublicProjectViewer({ token }: { token: string }) {
 
   return (
     <div className="min-h-screen w-full" style={{ background: '#0A0412' }}>
-      {/* Top bar — project name + Ghost wordmark linking back to the app */}
+      {/* Top bar — project name + Made-with-Ghost wordmark linking back. */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-white/[0.06]">
         <div className="min-w-0">
           <div className="text-[11px] uppercase tracking-wider text-white/40">Shared project</div>
@@ -163,8 +159,8 @@ export default function PublicProjectViewer({ token }: { token: string }) {
         </a>
       </div>
 
-      {/* Transport — one big play button + time */}
-      <div className="px-6 pt-6 pb-4 flex items-center gap-4">
+      {/* Transport — one big play button + time + meta */}
+      <div className="px-6 pt-5 pb-3 flex items-center gap-4">
         <motion.button
           onClick={togglePlay}
           disabled={!tracksReady}
@@ -191,43 +187,70 @@ export default function PublicProjectViewer({ token }: { token: string }) {
         )}
       </div>
 
-      {/* Timeline — each track on its own lane, clip absolute-positioned by
-          startOffset / trimmed length so the layout matches what the owner
-          arranged in the editor. */}
+      {/* Arrangement — bar ruler + lanes + grid overlay + playhead. The
+          ruler / overlay / playhead are pulled straight from the editor so
+          the time axis renders identically (same bar numbers, same tick
+          density, same playhead colour/glow). */}
       <div className="px-6 pb-12">
-        <div className="rounded-xl border border-white/[0.06] overflow-hidden">
-          {audioTracks.length === 0 && (
-            <div className="px-4 py-8 text-center text-white/40 text-sm">No audio tracks in this project yet.</div>
-          )}
-          {audioTracks.map((t: any) => (
-            <PublicTrackLane key={t.id} track={t} timelineEnd={timelineEnd} />
-          ))}
+        <div className="rounded-xl border border-white/[0.06] overflow-hidden" style={{ background: 'rgba(0,0,0,0.25)' }}>
+          <BarRuler />
+          <div className="relative">
+            {audioTracks.length === 0 && (
+              <div className="px-4 py-10 text-center text-white/40 text-sm">No audio tracks in this project yet.</div>
+            )}
+            {audioTracks.map((t: any, idx: number) => (
+              <ViewerLane key={t.id} track={t} colourIdx={idx} />
+            ))}
+            <BarGridOverlay />
+            <ArrangementPlayhead />
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-function PublicTrackLane({ track, timelineEnd }: { track: any; timelineEnd: number }) {
+// Per-track lane. Mirrors the editor's LaneRow layout: a fixed-width
+// header column with name + colour dot, then the relative clip area where
+// a single Waveform clip is positioned absolutely by startOffset.
+function ViewerLane({ track, colourIdx }: { track: any; colourIdx: number }) {
+  const { arrangementDur } = useArrangement();
   const loaded = useAudioStore((s) => s.loadedTracks.get(track.id));
+
   const playbackRate = loaded ? Math.pow(2, (loaded.pitch || 0) / 12) : 1;
   const bufferDuration = loaded?.buffer?.duration ?? 0;
   const trimStart = loaded?.trimStart ?? 0;
   const trimEnd = (loaded?.trimEnd ?? 0) > 0 ? loaded!.trimEnd : bufferDuration;
   const startOffset = loaded?.startOffset ?? 0;
   const clipDur = bufferDuration > 0 ? Math.max(0, (trimEnd - trimStart) / Math.max(0.0001, playbackRate)) : 0;
-  const leftPct = timelineEnd > 0 ? (startOffset / timelineEnd) * 100 : 0;
-  const widthPct = timelineEnd > 0 ? (clipDur / timelineEnd) * 100 : 0;
-  const displayName = (track.name || 'Track').replace(/\.(wav|mp3|flac|aiff|ogg|m4a)$/i, '').replace(/_/g, ' ');
+
+  const haveTime = clipDur > 0 && arrangementDur > 0;
+  const leftPct = haveTime ? (startOffset / arrangementDur) * 100 : 0;
+  const widthPct = haveTime ? (clipDur / arrangementDur) * 100 : 0;
+
+  // Same colour-dot palette the editor uses to give each lane an identity
+  // even when names are truncated. Looped so any track count works.
+  const dotPalette = ['#A855F7', '#00FFC8', '#3B82F6', '#EC4899', '#F59E0B', '#10B981', '#8B5CF6'];
+  const dot = dotPalette[colourIdx % dotPalette.length];
+
+  const displayName = (track.name || 'Track')
+    .replace(/\.(wav|mp3|flac|aiff|ogg|m4a)$/i, '')
+    .replace(/_/g, ' ');
 
   return (
-    <div className="flex items-stretch border-b border-white/[0.04] last:border-b-0" style={{ height: 64 }}>
-      <div className="w-32 shrink-0 px-3 py-2 border-r border-white/[0.04] flex flex-col justify-center">
-        <div className="text-white text-[12px] font-semibold truncate">{displayName}</div>
-        <div className="text-white/40 text-[10px] truncate">{track.type || 'audio'}</div>
+    <div className="flex items-stretch border-b border-white/[0.04] last:border-b-0" style={{ height: 56 }}>
+      <div
+        style={{ width: TRACK_HEADER_WIDTH }}
+        className="shrink-0 px-2 py-1.5 border-r border-white/[0.04] flex items-center gap-2"
+      >
+        <span style={{ background: dot, width: 6, height: 6, borderRadius: 999, flexShrink: 0, boxShadow: `0 0 6px ${dot}80` }} />
+        <div className="min-w-0 flex-1">
+          <div className="text-white text-[11px] font-semibold truncate leading-tight">{displayName}</div>
+          <div className="text-white/40 text-[9px] uppercase tracking-wider truncate">{track.type || 'audio'}</div>
+        </div>
       </div>
       <div className="flex-1 relative">
-        {clipDur > 0 && (
+        {haveTime && (
           <div
             className="absolute top-1 bottom-1 rounded-md overflow-hidden"
             style={{
@@ -239,7 +262,7 @@ function PublicTrackLane({ track, timelineEnd }: { track: any; timelineEnd: numb
           >
             <Waveform
               seed={track.name + (track.type || 'audio')}
-              height={62}
+              height={52}
               trackId={track.id}
               showPlayhead={true}
               viewStart={trimStart}
