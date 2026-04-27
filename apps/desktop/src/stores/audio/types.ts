@@ -29,6 +29,12 @@ export interface LoadedTrack {
   // (loadTrack, splitTrack, duplicateTrack) keep compiling without each
   // having to opt in explicitly.
   warp?: boolean;
+  // User-pinned warp markers, in ORIGINAL buffer seconds. Empty array
+  // means "no manual warp markers" — playback uses the global stretch
+  // factor. When populated, future versions will warp each segment
+  // between markers independently (Ableton-style). For now they're
+  // visual + interactive only.
+  warpMarkers?: number[];
 }
 
 export interface UndoSnapshot {
@@ -53,6 +59,9 @@ export interface ArrangementClipState {
   // Whether warp/stretch is active. Undefined ≡ true (default) so old
   // arrangement blobs without this field keep behaving the same.
   warp?: boolean;
+  // User-pinned warp markers in original-buffer seconds. Persisted with
+  // the arrangement so the user's marker placements survive a reload.
+  warpMarkers?: number[];
   parentTrackId?: string;
   parentFileId?: string;
 }

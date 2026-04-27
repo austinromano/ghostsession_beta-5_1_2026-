@@ -213,6 +213,7 @@ interface AudioState {
   setTrackSoloed: (trackId: string, soloed: boolean) => void;
   setTrackPitch: (trackId: string, semitones: number) => void;
   setTrackTrim: (trackId: string, trimStart: number, trimEnd: number) => void;
+  setTrackWarpMarkers: (trackId: string, markers: number[]) => void;
   setTrackOffset: (trackId: string, offset: number) => void;
   duplicateTrack: (trackId: string) => string | null;
   splitTrack: (trackId: string, atTime: number) => string | null;
@@ -899,6 +900,20 @@ export const useAudioStore = create<AudioState>((set, get) => {
       restartIfPlaying();
     },
 
+    setTrackWarpMarkers: (trackId, markers) => {
+      const { loadedTracks } = get();
+      const track = loadedTracks.get(trackId);
+      if (!track) return;
+      // Sort + dedupe so segment math is stable downstream once we hook
+      // markers into the stretch engine.
+      const sorted = Array.from(new Set(markers))
+        .filter((m) => Number.isFinite(m) && m >= 0)
+        .sort((a, b) => a - b);
+      track.warpMarkers = sorted;
+      set({ loadedTracks: new Map(loadedTracks) });
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    },
+
     duplicateTrack: (trackId) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
@@ -974,6 +989,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           pitch: track.pitch,
           bpm: track.bpm || undefined,
           warp: track.warp,
+          warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
           parentTrackId: parentId,
           parentFileId: parentId ? serverTrackFileIds.get(parentId) : undefined,
         });
@@ -1017,6 +1033,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.muted = clip.muted;
           existing.soloed = clip.soloed;
           existing.pitch = clip.pitch;
+          existing.warpMarkers = (clip as any).warpMarkers;
           // Warp / BPM override / pitch can all change in a remote update.
           // Detect any of them shifting and rebuild the playback buffer
           // through composePlayBuffer so the combined warp + pitch stretch

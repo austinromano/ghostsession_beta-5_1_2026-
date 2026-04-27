@@ -165,10 +165,10 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         </button>
       </div>
 
-      {/* Centre: big waveform with a bar-line overlay so the user can
-          see where each bar lands inside the clip — same look as the
-          arrangement's BarGridOverlay, but scaled to this single
-          trimmed clip. */}
+      {/* Centre: big waveform with a bar-line overlay + warp markers
+          (gray transient markers at detected beats, gold user-pinned
+          warp markers). Right-click empty space to add a marker, drag
+          a marker to move, right-click to remove. */}
       <div className="flex-1 min-w-0 px-3 py-2 flex">
         <div className="flex-1 relative">
           <Waveform
@@ -180,6 +180,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
             showPlayhead={true}
           />
           <SampleEditorBarGrid trackId={trackId} />
+          <WarpMarkerOverlay trackId={trackId} beats={(projectTrack as any).beats || []} />
         </div>
       </div>
 
@@ -308,6 +309,166 @@ function Slider({ label, value, min, max, step, format, onChange, mixed }: {
         style={{ opacity: mixed ? 0.6 : 1 }}
       />
     </div>
+  );
+}
+
+/**
+ * Ableton-style warp + transient markers above the waveform.
+ *
+ * - Gray downward triangles at every detected transient (`beats[]`),
+ *   non-interactive — purely a visual reference for where the audio's
+ *   transient onsets sit.
+ * - Gold downward triangles at every user-placed warp marker
+ *   (`track.warpMarkers`, in original-buffer seconds). Draggable to
+ *   reposition, right-click to delete.
+ * - Right-click on empty header space adds a new warp marker at the
+ *   cursor's source-time position.
+ *
+ * For now markers are visual + persisted only — they don't yet drive
+ * the WSOLA stretch engine. Hooking them into composePlayBuffer for
+ * piecewise warping is a follow-up.
+ */
+function WarpMarkerOverlay({ trackId, beats }: { trackId: string; beats: number[] }) {
+  const trimStart = useAudioStore((s) => s.loadedTracks.get(trackId)?.trimStart ?? 0);
+  const trimEnd = useAudioStore((s) => s.loadedTracks.get(trackId)?.trimEnd ?? 0);
+  const bufferDuration = useAudioStore((s) => s.loadedTracks.get(trackId)?.buffer?.duration ?? 0);
+  const originalDuration = useAudioStore((s) => s.loadedTracks.get(trackId)?.originalBuffer?.duration ?? 0);
+  const warpMarkers = useAudioStore((s) => s.loadedTracks.get(trackId)?.warpMarkers ?? []);
+  const setTrackWarpMarkers = useAudioStore((s) => s.setTrackWarpMarkers);
+
+  if (bufferDuration <= 0) return null;
+  const effectiveTrimEnd = trimEnd > 0 ? trimEnd : bufferDuration;
+
+  // Beat positions are in ORIGINAL buffer seconds. Stretch ratio between
+  // original and current play buffer maps them into buffer time so they
+  // sit on the same pixel as the matching transient in the rendered
+  // waveform.
+  const stretchRatio = originalDuration > 0 ? bufferDuration / originalDuration : 1;
+  const sourceToBufferTime = (s: number) => s * stretchRatio;
+  const bufferToSourceTime = (b: number) => b / Math.max(0.0001, stretchRatio);
+
+  // Map a buffer-time value to the visible pixel position (percentage)
+  // inside the trimmed waveform. Returns null if outside the trim range.
+  const bufTimeToPct = (b: number): number | null => {
+    if (b < trimStart || b > effectiveTrimEnd) return null;
+    return ((b - trimStart) / (effectiveTrimEnd - trimStart)) * 100;
+  };
+
+  const onHeaderContextMenu = (e: React.MouseEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    if ((e.target as HTMLElement).closest('[data-warp-marker]')) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    const bufTime = trimStart + pct * (effectiveTrimEnd - trimStart);
+    const sourceTime = bufferToSourceTime(bufTime);
+    setTrackWarpMarkers(trackId, [...warpMarkers, sourceTime]);
+  };
+
+  const onMarkerPointerDown = (idx: number) => (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.button === 2) return; // right-click handled separately
+    const target = e.currentTarget;
+    const rect = target.parentElement!.getBoundingClientRect();
+    target.setPointerCapture?.(e.pointerId);
+    const onMove = (ev: PointerEvent) => {
+      const pct = (ev.clientX - rect.left) / rect.width;
+      const bufTime = trimStart + Math.max(0, Math.min(1, pct)) * (effectiveTrimEnd - trimStart);
+      const sourceTime = bufferToSourceTime(bufTime);
+      const next = warpMarkers.slice();
+      next[idx] = sourceTime;
+      setTrackWarpMarkers(trackId, next);
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const onMarkerContextMenu = (idx: number) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setTrackWarpMarkers(trackId, warpMarkers.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <>
+      {/* Top header strip — receives right-click to add a new marker. */}
+      <div
+        className="absolute top-0 left-0 right-0 cursor-crosshair"
+        style={{ height: 10 }}
+        onContextMenu={onHeaderContextMenu}
+        title="Right-click to add a warp marker"
+      />
+      {/* Transient markers — non-interactive, gray downward triangles */}
+      {beats.map((beatSec, i) => {
+        const bufTime = sourceToBufferTime(beatSec);
+        const pct = bufTimeToPct(bufTime);
+        if (pct === null) return null;
+        return (
+          <div
+            key={`tr-${i}`}
+            className="absolute top-0 pointer-events-none"
+            style={{
+              left: `calc(${pct}% - 3px)`,
+              width: 6,
+              height: 6,
+              borderLeft: '3px solid transparent',
+              borderRight: '3px solid transparent',
+              borderTop: '5px solid rgba(255,255,255,0.35)',
+            }}
+          />
+        );
+      })}
+      {/* User warp markers — gold draggable triangles + a thin gold line
+          straight down through the waveform so they're easy to spot. */}
+      {warpMarkers.map((sourceSec, i) => {
+        const bufTime = sourceToBufferTime(sourceSec);
+        const pct = bufTimeToPct(bufTime);
+        if (pct === null) return null;
+        return (
+          <div
+            key={`warp-${i}`}
+            data-warp-marker
+            onPointerDown={onMarkerPointerDown(i)}
+            onContextMenu={onMarkerContextMenu(i)}
+            className="absolute top-0 bottom-0 cursor-ew-resize z-10"
+            style={{ left: `calc(${pct}% - 6px)`, width: 12 }}
+            title="Drag to move · Right-click to delete"
+          >
+            {/* Gold pin head */}
+            <div
+              className="absolute"
+              style={{
+                left: '50%',
+                top: 0,
+                transform: 'translateX(-50%)',
+                width: 0,
+                height: 0,
+                borderLeft: '5px solid transparent',
+                borderRight: '5px solid transparent',
+                borderTop: '8px solid #F5C518',
+                filter: 'drop-shadow(0 0 4px rgba(245,197,24,0.6))',
+              }}
+            />
+            {/* Vertical line through the waveform */}
+            <div
+              className="absolute pointer-events-none"
+              style={{
+                left: '50%',
+                top: 7,
+                bottom: 0,
+                width: 1,
+                background: 'rgba(245,197,24,0.55)',
+                boxShadow: '0 0 4px rgba(245,197,24,0.4)',
+              }}
+            />
+          </div>
+        );
+      })}
+    </>
   );
 }
 
