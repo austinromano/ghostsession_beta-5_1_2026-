@@ -432,6 +432,14 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         // Keep selection local — collaborators have their own panel focus.
         selectedClipId: s.selectedClipId,
       }));
+      // Quantize incoming clips to the local project's bar grid. If the
+      // payload was saved at a slightly different BPM (or accumulated
+      // sub-bar drift over many tempo changes), this brings every clip
+      // back onto a clean bar boundary so the visuals line up with the
+      // ruler exactly.
+      if (useAudioStore.getState().projectBpm > 0) {
+        snapClipsToProjectGrid(1);
+      }
     } finally {
       _applyingRemote = false;
     }
@@ -462,19 +470,30 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
 // Bar-lock drum clip positions when the project tempo changes. The
 // audioStore's setProjectBpm dispatches `ghost-bpm-rescale` with the
 // ratio (oldBpm / newBpm); we scale every clip's startSec + lengthSec
-// by it so the pattern blocks stay on the same bars after the tempo
-// change instead of sliding around in seconds.
+// by it AND re-snap to the new bar grid. Without the snap, multiple
+// tempo changes accumulate floating-point drift and clips end up
+// fractions of a beat off the bar lines they should sit on.
+function snapClipsToProjectGrid(scale = 1) {
+  const newBpm = useAudioStore.getState().projectBpm || 120;
+  const newBarSec = 240 / newBpm;
+  useDrumRack.setState((s) => ({
+    clips: s.clips.map((c) => {
+      const scaledStart = c.startSec * scale;
+      const scaledLen = c.lengthSec * scale;
+      return {
+        ...c,
+        startSec: Math.max(0, Math.round(scaledStart / newBarSec) * newBarSec),
+        lengthSec: Math.max(newBarSec, Math.round(scaledLen / newBarSec) * newBarSec),
+      };
+    }),
+  }));
+}
+
 if (typeof window !== 'undefined') {
   window.addEventListener('ghost-bpm-rescale', ((e: CustomEvent) => {
     const ratio = e.detail?.ratio;
     if (!ratio || Math.abs(ratio - 1) < 1e-6) return;
-    useDrumRack.setState((s) => ({
-      clips: s.clips.map((c) => ({
-        ...c,
-        startSec: c.startSec * ratio,
-        lengthSec: c.lengthSec * ratio,
-      })),
-    }));
+    snapClipsToProjectGrid(ratio);
   }) as EventListener);
 }
 
