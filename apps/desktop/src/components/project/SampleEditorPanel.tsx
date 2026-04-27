@@ -165,16 +165,22 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         </button>
       </div>
 
-      {/* Centre: big waveform */}
+      {/* Centre: big waveform with a bar-line overlay so the user can
+          see where each bar lands inside the clip — same look as the
+          arrangement's BarGridOverlay, but scaled to this single
+          trimmed clip. */}
       <div className="flex-1 min-w-0 px-3 py-2 flex">
-        <Waveform
-          seed={`editor:${trackId}`}
-          height={120}
-          fileId={projectTrack.fileId}
-          projectId={projectId}
-          trackId={trackId}
-          showPlayhead={true}
-        />
+        <div className="flex-1 relative">
+          <Waveform
+            seed={`editor:${trackId}`}
+            height={120}
+            fileId={projectTrack.fileId}
+            projectId={projectId}
+            trackId={trackId}
+            showPlayhead={true}
+          />
+          <SampleEditorBarGrid trackId={trackId} />
+        </div>
       </div>
 
       {/* Right: knobs (volume + pitch). Plain range inputs for now —
@@ -301,6 +307,52 @@ function Slider({ label, value, min, max, step, format, onChange, mixed }: {
         className="w-full accent-ghost-green"
         style={{ opacity: mixed ? 0.6 : 1 }}
       />
+    </div>
+  );
+}
+
+/**
+ * Bar-line overlay for the sample editor's big waveform. Computes how
+ * many bars the trimmed clip spans at the current project tempo and
+ * draws a faint vertical line at each bar boundary. Same look as the
+ * arrangement's BarGridOverlay, scoped to one clip.
+ */
+function SampleEditorBarGrid({ trackId }: { trackId: string }) {
+  const projectBpm = useAudioStore((s) => s.projectBpm);
+  const trimStart = useAudioStore((s) => s.loadedTracks.get(trackId)?.trimStart ?? 0);
+  const trimEnd = useAudioStore((s) => s.loadedTracks.get(trackId)?.trimEnd ?? 0);
+  const bufferDuration = useAudioStore((s) => s.loadedTracks.get(trackId)?.buffer?.duration ?? 0);
+  const pitch = useAudioStore((s) => s.loadedTracks.get(trackId)?.pitch ?? 0);
+
+  if (bufferDuration <= 0 || projectBpm <= 0) return null;
+
+  const playbackRate = Math.pow(2, pitch / 12);
+  const effectiveTrimEnd = trimEnd > 0 ? trimEnd : bufferDuration;
+  const clipDurTimeline = (effectiveTrimEnd - trimStart) / Math.max(0.0001, playbackRate);
+  const barSec = 240 / projectBpm;
+  const numBars = Math.max(1, Math.round(clipDurTimeline / barSec));
+
+  // Bright line every `labeledStep` bars (matches the arrangement's
+  // overlay density), dim line on every bar in between.
+  const labeledStep = numBars <= 8 ? 1 : numBars <= 16 ? 2 : numBars <= 32 ? 4 : 8;
+
+  return (
+    <div className="absolute inset-0 pointer-events-none">
+      {Array.from({ length: numBars + 1 }).map((_, i) => {
+        const isLabeled = i % labeledStep === 0;
+        const leftPct = (i / numBars) * 100;
+        return (
+          <div
+            key={i}
+            className="absolute top-0 bottom-0"
+            style={{
+              left: `${leftPct}%`,
+              width: 1,
+              background: isLabeled ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.07)',
+            }}
+          />
+        );
+      })}
     </div>
   );
 }
