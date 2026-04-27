@@ -900,7 +900,7 @@ export default function PluginLayout() {
                                 fetchProject={fetchProject}
                                 members={members}
                               />
-                              <MasterTrackLane />
+                              <MasterTrackLane trackZoom={trackZoom} />
                               <ArrangementPlayhead />
                               <ArrangementComments projectId={selectedProjectId!} />
                             </ArrangementScrollView>
