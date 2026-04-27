@@ -41,17 +41,15 @@ export default memo(function Waveform({
     ? fullEffectiveDuration * (viewSpan / bufferDuration)
     : 0;
 
-  // Always prefer the live track buffer when one's loaded. This is what
-  // makes warp markers, pitch shifts, BPM stretches, and per-clip
-  // duplicates render their actual processed waveform — not the
-  // cached original PCM. fileId-based decode below stays as a fallback
-  // for when no track has been loaded yet (e.g. sample library
-  // previews that don't go through audioStore).
-  useEffect(() => {
-    if (trackBuffer) {
-      setRawData(trackBuffer.getChannelData(0));
-    }
-  }, [trackBuffer]);
+  // Track buffer changes (warp marker drag, pitch / BPM / warp toggle)
+  // are picked up directly in the audioData derivation below — no
+  // useEffect → setRawData round trip, which used to add a one-render
+  // lag where the FIRST frame after a buffer change still drew the
+  // old peaks. The bufferVersion subscription forces a re-render
+  // whenever the audio store rebuilds a buffer, so the canvas redraws
+  // mid-drag too.
+  const bufferVersion = useAudioStore((s) => s.bufferVersion);
+  void bufferVersion;
 
   useEffect(() => {
     if (!fileId || !projectId) return;
@@ -101,7 +99,13 @@ export default memo(function Waveform({
     return data;
   }, [seed, rawData, fileId, projectId, loadFailed]);
 
-  const audioData = rawData || fakeData;
+  // Derive audioData directly from whichever source is freshest. Track
+  // buffer wins when a track is loaded (changes per warp / pitch / BPM
+  // edit), then the rawData state (sample library previews + the
+  // fileId-decode fallback), then the placeholder fake noise. Pulling
+  // off the live buffer here means the draw effect fires the same
+  // render the buffer changes — no setState round trip in between.
+  const audioData = trackBuffer ? trackBuffer.getChannelData(0) : (rawData || fakeData);
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current;
