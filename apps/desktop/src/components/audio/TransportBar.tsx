@@ -5,6 +5,7 @@ import { audioBufferCache, cacheBuffer, detectBpmFromName, formatTime, snapToGri
 import { api } from '../../lib/api';
 import { getSocket } from '../../lib/socket';
 import { useCollabStore } from '../../stores/collabStore';
+import { useDrumRack, getDrumSyncSnapshot } from '../../stores/drumRackStore';
 import FrequencyBar, { type VizMode } from './FrequencyBar';
 
 // Ableton-style time-region clipboard. Cmd+C captures the selection as a
@@ -196,6 +197,12 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
           if (Array.isArray(parsed.laneOrder)) {
             useAudioStore.getState().setLaneOrder(parsed.laneOrder);
           }
+          // Drum-rack state lives in the same blob — rows (sample slots,
+          // sans buffers) + clips (pattern blocks). applyRemoteState
+          // re-fetches missing buffers per fileId.
+          if (parsed.drumRack && Array.isArray(parsed.drumRack.rows) && Array.isArray(parsed.drumRack.clips)) {
+            useDrumRack.getState().applyRemoteState(parsed.drumRack);
+          }
           lastAppliedServerRef.current = serverArrangementJson;
           return;
         } else {
@@ -231,6 +238,9 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         if (Array.isArray(parsed.laneOrder)) {
           useAudioStore.getState().setLaneOrder(parsed.laneOrder);
         }
+        if (parsed.drumRack && Array.isArray(parsed.drumRack.rows) && Array.isArray(parsed.drumRack.clips)) {
+          useDrumRack.getState().applyRemoteState(parsed.drumRack);
+        }
         lastAppliedServerRef.current = serverArrangementJson;
       }
     } catch { /* ignore malformed blobs */ }
@@ -245,6 +255,11 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
   const bufferVersion = useAudioStore((s) => s.bufferVersion);
   const arrangeLoadedTracks = useAudioStore((s) => s.loadedTracks);
   const arrangeLaneOrder = useAudioStore((s) => s.laneOrder);
+  // Subscribe to drum-rack rows + clips so changes (toggleStep, moveClip,
+  // addEmptyRow, etc.) re-trigger the save effect and the new pattern
+  // hits the server in the same arrangement blob.
+  const drumRackRows = useDrumRack((s) => s.rows);
+  const drumRackClips = useDrumRack((s) => s.clips);
   useEffect(() => {
     if (!projectId || !tracks || arrangeLoadedTracks.size === 0) return;
     if (restoredProjectIdRef.current !== projectId) {
@@ -269,7 +284,12 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         if (t.fileId) fileIdMap.set(t.id, t.fileId);
       }
       try {
-        const state = useAudioStore.getState().buildArrangementState(fileIdMap);
+        const baseState = useAudioStore.getState().buildArrangementState(fileIdMap);
+        // Roll the drum-rack snapshot into the same blob so a single PUT
+        // /arrangement persists both audio clips AND drum patterns. Server
+        // accepts arbitrary fields — only `clips` is required.
+        const drumRack = getDrumSyncSnapshot();
+        const state = drumRack ? { ...baseState, drumRack } : baseState;
         const payload = JSON.stringify(state);
         // Skip if nothing has changed since the last POST. Otherwise every
         // server-side project-updated would refetch → new tracks prop ref →
@@ -277,7 +297,7 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         if (payload === lastSentServerRef.current) return;
         useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
         lastSentServerRef.current = payload;
-        console.log('[arrangement] POSTing to server', { projectId, clips: state.clips.length });
+        console.log('[arrangement] POSTing to server', { projectId, clips: state.clips.length, drumClips: drumRack?.clips.length ?? 0 });
         await api.saveArrangement(projectId, state);
         console.log('[arrangement] POST ok');
       } catch (err) {
@@ -285,7 +305,7 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
       }
     }, 500);
     return () => clearTimeout(timer);
-  }, [projectId, tracks, bufferVersion, arrangeLoadedTracks, arrangeLaneOrder]);
+  }, [projectId, tracks, bufferVersion, arrangeLoadedTracks, arrangeLaneOrder, drumRackRows, drumRackClips]);
 
   // Immediate save on explicit drops / other critical moments — bypasses the
   // 500 ms debounce so the arrangement survives if the plugin is closed
@@ -316,7 +336,9 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         if (t.fileId) fileIdMap.set(t.id, t.fileId);
       }
       try {
-        const state = useAudioStore.getState().buildArrangementState(fileIdMap);
+        const baseState = useAudioStore.getState().buildArrangementState(fileIdMap);
+        const drumRack = getDrumSyncSnapshot();
+        const state = drumRack ? { ...baseState, drumRack } : baseState;
         const payload = JSON.stringify(state);
         if (payload === lastSentServerRef.current) {
           console.log('[arrangement] flush skip — state unchanged', { projectId });
@@ -325,7 +347,7 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
         lastSentServerRef.current = payload;
         const offsets = state.clips.map((c: any) => `${c.trackId.slice(0, 6)}@${c.startOffset.toFixed(2)}`);
-        console.log('[arrangement] flush POST', { projectId, clips: state.clips.length, offsets });
+        console.log('[arrangement] flush POST', { projectId, clips: state.clips.length, drumClips: drumRack?.clips.length ?? 0, offsets });
         api.saveArrangement(projectId, state).then(() => {
           console.log('[arrangement] flush POST ok', { projectId });
         }).catch((err) => {
