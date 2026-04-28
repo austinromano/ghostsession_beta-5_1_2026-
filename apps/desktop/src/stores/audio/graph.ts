@@ -1,20 +1,26 @@
 import { FFT_SIZE, SMOOTHING_TIME_CONSTANT } from '../../lib/constants';
 
 /**
- * Audio routing — Ableton/FL Studio style bus architecture.
+ * Audio routing — single FX-bus architecture.
  *
- *   Track / drum source → trackGain ─┐
- *                                    ├──→ mixerBus → masterGain ──→ destination
- *   Track / drum source → trackGain ─┘                ↑          ↘
- *                                                     │            masterAnalyser  (parallel meter)
- *                          per-track sendNode ───→ reverbBus → convolver → reverbReturn ─┘
+ *   Track / drum source → trackGain → trackPan ─┐
+ *                                                ├──→ fxBusInput
+ *                                                │       │
+ *                                                │       ▼
+ *                                                │   busEqLow → busEqMid → busEqHigh → busComp ─┬──→ busDry ──┐
+ *                                                │                                              └──→ convolver → busWet ─┤
+ *                                                │                                                                       ▼
+ *                                                │                                                                  fxBusOut → mixerBus → masterGain → limiter → destination
+ *                                                │                                                                                ↘
+ *                                                │                                                                                  masterAnalyser  (parallel meter)
+ *                                                ▼
+ *                                       (or dry-direct-to-mixerBus path for tracks that opt-out — future)
  *
- * Reverb send bus is the channel-strip's first FX return — every track has
- * a per-track sendNode tapped post-pan that feeds a single shared
- * convolver. The wet output mixes back into the mixer bus through a
- * reverbReturn fader so the user can blend wet vs. dry on the master
- * without re-tweaking every send. ConvolverNode IR is generated
- * synthetically (exponential-decay noise) so we don't ship an IR file.
+ * Master FX bus replaces the per-track EQ / Comp / Reverb-send model. Every
+ * track / drum row routes into fxBusInput, the bus chain processes the
+ * signal once, and the wet/dry mix lands on the mixer. One UI surface
+ * controls every FX param — clicking the bus track opens the channel
+ * strip showing EQ + Comp + Reverb side-by-side.
  *
  * Three reasons this matters:
  *   1. Single mixer bus is the natural place to hang sends, FX returns, and
@@ -26,7 +32,8 @@ import { FFT_SIZE, SMOOTHING_TIME_CONSTANT } from '../../lib/constants';
  *      preserves the cleanest signal.
  *   3. getMaster() still returns the entry point everything connects to,
  *      so existing callers (audioStore.startAllSources, drumRackStore
- *      scheduler) keep working without a rename.
+ *      scheduler) keep working without a rename — they now land on the
+ *      FX bus input instead of mixerBus directly.
  */
 
 let audioCtx: AudioContext | null = null;
@@ -37,18 +44,29 @@ let masterAnalyser: AnalyserNode | null = null;
 // the worklet registers (init() builds the graph without it, then
 // hot-swaps the master→destination edge through the limiter).
 let masterLimiter: AudioWorkletNode | null = null;
-// Drum sub-bus: every drum row sums into here, then drumBus → mixerBus.
-// Lets the Drum Rack lane meter tap the SUM of all drum hits in
-// parallel without affecting the audio path.
+// Drum sub-bus: every drum row sums into here, then drumBus → fxBusInput
+// (so drum hits get FX'd by the master bus alongside tracks).
 let drumBus: GainNode | null = null;
 let drumAnalyser: AnalyserNode | null = null;
-// Reverb send bus — every per-track sendNode connects into reverbBus,
-// which feeds a single shared ConvolverNode. The wet output runs through
-// reverbReturn (a master wet-level fader) and mixes back into mixerBus.
-let reverbBus: GainNode | null = null;
-let reverbConvolver: ConvolverNode | null = null;
-let reverbReturn: GainNode | null = null;
-let reverbDecaySec = 1.8; // current IR decay length — drives regenerateReverbIR()
+
+// FX bus — the channel strip that processes every track. Lives between
+// the per-track pan stage and the mixerBus. Inputs (tracks, drum bus)
+// land on fxBusInput; the chain runs eq → comp → wet/dry split → fxBusOut,
+// and fxBusOut feeds the mixer.
+let fxBusInput: GainNode | null = null;
+let busEqLow: BiquadFilterNode | null = null;
+let busEqMid: BiquadFilterNode | null = null;
+let busEqHigh: BiquadFilterNode | null = null;
+let busComp: AudioWorkletNode | null = null;
+// Hot bypass node used while the compressor worklet finishes registering.
+// Audio routes input → bypass → wet/dry split until the worklet is
+// available, then we splice the worklet in atomically.
+let busCompBypass: GainNode | null = null;
+let busDry: GainNode | null = null;
+let busWet: GainNode | null = null;
+let busConvolver: ConvolverNode | null = null;
+let fxBusOut: GainNode | null = null;
+let busDecaySec = 1.8;
 
 function init() {
   // `latencyHint: 'playback'` lets the browser allocate larger buffers and
@@ -82,36 +100,61 @@ function init() {
   drumAnalyser.fftSize = FFT_SIZE;
   drumAnalyser.smoothingTimeConstant = SMOOTHING_TIME_CONSTANT;
 
-  // Reverb send bus + return path. Built once at graph init so per-track
-  // sends can connect into reverbBus the moment a track starts playing.
-  reverbBus = audioCtx.createGain();
-  reverbBus.gain.value = 1; // bus-level trim, fixed at unity for now
-  reverbConvolver = audioCtx.createConvolver();
-  reverbConvolver.normalize = true;
-  reverbReturn = audioCtx.createGain();
-  // Persisted master wet-return level. 0.35 default — enough to be
-  // audible when the user pushes any send up but quiet enough that it
-  // doesn't dominate at moderate send levels.
-  let savedReverbReturn = 0.35;
-  try {
-    const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem('ghost_reverb_return') : null;
-    const v = raw ? parseFloat(raw) : NaN;
-    if (isFinite(v) && v >= 0 && v <= 1.5) savedReverbReturn = v;
-  } catch { /* default 0.35 */ }
-  reverbReturn.gain.value = savedReverbReturn;
-  // Persisted decay length. Drives the synthetic IR — regenerated below.
-  try {
-    const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem('ghost_reverb_decay') : null;
-    const v = raw ? parseFloat(raw) : NaN;
-    if (isFinite(v) && v >= 0.1 && v <= 6) reverbDecaySec = v;
-  } catch { /* default 1.8 */ }
-  reverbConvolver.buffer = buildReverbIR(audioCtx, reverbDecaySec);
-  reverbBus.connect(reverbConvolver);
-  reverbConvolver.connect(reverbReturn);
-  reverbReturn.connect(mixerBus);
+  // Build the FX bus. Persisted values for EQ / Comp / Reverb wet+decay
+  // come from localStorage so the bus's processing state survives a
+  // reload. Defaults are the channel-strip-transparent values
+  // (every band 0 dB, ratio 1, wet 0%).
+  fxBusInput = audioCtx.createGain();
+  fxBusInput.gain.value = 1;
+
+  busEqLow = audioCtx.createBiquadFilter();
+  busEqLow.type = 'lowshelf';
+  busEqLow.frequency.value = 80;
+  busEqLow.gain.value = readNumber('ghost_bus_eq_low', -24, 24, 0);
+
+  busEqMid = audioCtx.createBiquadFilter();
+  busEqMid.type = 'peaking';
+  busEqMid.frequency.value = 1000;
+  busEqMid.Q.value = 0.7;
+  busEqMid.gain.value = readNumber('ghost_bus_eq_mid', -24, 24, 0);
+
+  busEqHigh = audioCtx.createBiquadFilter();
+  busEqHigh.type = 'highshelf';
+  busEqHigh.frequency.value = 8000;
+  busEqHigh.gain.value = readNumber('ghost_bus_eq_high', -24, 24, 0);
+
+  // Bypass between EQ chain and the wet/dry split — replaced by the
+  // compressor worklet once it registers.
+  busCompBypass = audioCtx.createGain();
+  busCompBypass.gain.value = 1;
+
+  busDry = audioCtx.createGain();
+  busDry.gain.value = 1;
+  busWet = audioCtx.createGain();
+  busWet.gain.value = readNumber('ghost_bus_reverb_wet', 0, 1, 0);
+
+  busConvolver = audioCtx.createConvolver();
+  busConvolver.normalize = true;
+  busDecaySec = readNumber('ghost_bus_reverb_decay', 0.1, 6, 1.8);
+  busConvolver.buffer = buildReverbIR(audioCtx, busDecaySec);
+
+  fxBusOut = audioCtx.createGain();
+  fxBusOut.gain.value = 1;
+
+  // Wire it together: input → eq → comp-bypass → splits → out → mixer.
+  fxBusInput.connect(busEqLow);
+  busEqLow.connect(busEqMid);
+  busEqMid.connect(busEqHigh);
+  busEqHigh.connect(busCompBypass);
+  busCompBypass.connect(busDry);
+  busCompBypass.connect(busConvolver);
+  busConvolver.connect(busWet);
+  busDry.connect(fxBusOut);
+  busWet.connect(fxBusOut);
+  fxBusOut.connect(mixerBus);
 
   // Audio path — kept as short as possible.
-  drumBus.connect(mixerBus);
+  drumBus.connect(fxBusInput);
   mixerBus.connect(masterGain);
   masterGain.connect(audioCtx.destination);
 
@@ -146,6 +189,50 @@ function init() {
   }).catch((err) => {
     if (typeof console !== 'undefined') console.warn('[graph] master limiter not registered', err);
   });
+
+  // Splice the bus compressor in once its worklet registers. Same
+  // hot-swap pattern as the master limiter — replaces busCompBypass with
+  // a real worklet without dropping audio.
+  ensureTrackCompressorWorklet().then(() => {
+    if (!audioCtx || !busEqHigh || !busDry || !busConvolver || busComp || !busCompBypass) return;
+    try {
+      busComp = new AudioWorkletNode(audioCtx, 'track-compressor', {
+        numberOfInputs: 1,
+        numberOfOutputs: 1,
+        outputChannelCount: [2],
+      });
+      // Apply persisted comp params before splicing so the first
+      // render quantum already runs at the user's settings.
+      const setParam = (name: string, v: number) => {
+        const p = (busComp!.parameters as unknown as Map<string, AudioParam>).get(name);
+        if (p) p.value = v;
+      };
+      setParam('threshold', readNumber('ghost_bus_comp_threshold', -60, 0, 0));
+      setParam('ratio', readNumber('ghost_bus_comp_ratio', 1, 20, 1));
+      setParam('attack', 0.003);
+      setParam('release', 0.1);
+      setParam('makeup', readNumber('ghost_bus_comp_makeup', -20, 20, 0));
+      // Atomic re-route: disconnect bypass → splits, then wire eq → comp → splits.
+      try { busEqHigh.disconnect(busCompBypass); } catch { /* ignore */ }
+      try { busCompBypass.disconnect(); } catch { /* ignore */ }
+      busEqHigh.connect(busComp);
+      busComp.connect(busDry);
+      busComp.connect(busConvolver);
+    } catch (err) {
+      if (typeof console !== 'undefined') console.warn('[graph] bus compressor install failed', err);
+    }
+  }).catch((err) => {
+    if (typeof console !== 'undefined') console.warn('[graph] bus compressor worklet not registered', err);
+  });
+}
+
+function readNumber(key: string, min: number, max: number, fallback: number): number {
+  try {
+    const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem(key) : null;
+    const v = raw ? parseFloat(raw) : NaN;
+    if (isFinite(v) && v >= min && v <= max) return v;
+  } catch { /* fall through */ }
+  return fallback;
 }
 
 /**
@@ -160,8 +247,7 @@ function buildReverbIR(ctx: AudioContext, decaySec: number): AudioBuffer {
   for (let ch = 0; ch < 2; ch++) {
     const data = ir.getChannelData(ch);
     for (let i = 0; i < length; i++) {
-      // Exponential decay envelope, 60 dB drop over decaySec — a
-      // standard "RT60-shaped" tail. Random noise gives a dense diffuse
+      // Exponential decay envelope. Random noise gives a dense diffuse
       // reverb without needing early reflections.
       const t = i / length;
       const env = Math.pow(1 - t, 3);
@@ -176,22 +262,84 @@ export function getCtx(): AudioContext {
   return audioCtx!;
 }
 
-/** Reverb send bus — per-track sendNodes connect into THIS GainNode. */
-export function getReverbBus(): GainNode {
-  if (!reverbBus) init();
-  return reverbBus!;
+/**
+ * FX bus input — every track / drum row connects into THIS node. The bus
+ * runs the EQ → Comp → Reverb chain and feeds the mixer.
+ */
+export function getFxBusInput(): GainNode {
+  if (!fxBusInput) init();
+  return fxBusInput!;
 }
 
-/** Master wet-return fader for the reverb bus. */
-export function getReverbReturn(): GainNode {
-  if (!reverbReturn) init();
-  return reverbReturn!;
+/**
+ * Update one of the bus EQ band gains. Smooth-ramps over 30 ms so a
+ * slider drag doesn't zipper. Values clamped to ±24 dB.
+ */
+export function setBusEqBand(band: 'low' | 'mid' | 'high', dB: number) {
+  if (!audioCtx) init();
+  const node = band === 'low' ? busEqLow : band === 'mid' ? busEqMid : busEqHigh;
+  if (!node) return;
+  const v = Math.max(-24, Math.min(24, dB));
+  try {
+    node.gain.cancelScheduledValues(audioCtx!.currentTime);
+    node.gain.linearRampToValueAtTime(v, audioCtx!.currentTime + 0.03);
+  } catch { node.gain.value = v; }
+  try { localStorage.setItem(`ghost_bus_eq_${band}`, String(v)); } catch { /* ignore */ }
 }
 
-/** Current reverb decay length, in seconds. */
-export function getReverbDecay(): number {
-  if (!reverbConvolver) init();
-  return reverbDecaySec;
+export function getBusEqBand(band: 'low' | 'mid' | 'high'): number {
+  if (!audioCtx) init();
+  const node = band === 'low' ? busEqLow : band === 'mid' ? busEqMid : busEqHigh;
+  return node?.gain.value ?? 0;
+}
+
+/**
+ * Update bus compressor params. No-op if the worklet hasn't registered
+ * yet (the bypass node passes audio through unchanged in the meantime,
+ * and the persisted localStorage value gets applied when init() splices
+ * the worklet in). Smooth-ramps each k-rate param.
+ */
+export function setBusCompParam(field: 'threshold' | 'ratio' | 'makeup', v: number) {
+  if (!audioCtx) init();
+  const ranges = { threshold: [-60, 0], ratio: [1, 20], makeup: [-20, 20] } as const;
+  const [min, max] = ranges[field];
+  const clamped = Math.max(min, Math.min(max, v));
+  try { localStorage.setItem(`ghost_bus_comp_${field}`, String(clamped)); } catch { /* ignore */ }
+  if (!busComp) return;
+  const p = (busComp.parameters as unknown as Map<string, AudioParam>).get(field);
+  if (!p) return;
+  try {
+    p.cancelScheduledValues(audioCtx!.currentTime);
+    p.linearRampToValueAtTime(clamped, audioCtx!.currentTime + 0.03);
+  } catch { p.value = clamped; }
+}
+
+export function getBusCompParam(field: 'threshold' | 'ratio' | 'makeup'): number {
+  if (!audioCtx) init();
+  const fallback = field === 'ratio' ? 1 : 0;
+  if (!busComp) return readNumber(`ghost_bus_comp_${field}`, -60, 20, fallback);
+  const p = (busComp.parameters as unknown as Map<string, AudioParam>).get(field);
+  return p?.value ?? fallback;
+}
+
+/**
+ * Update bus reverb wet level (0..1). 0 = fully dry, 1 = wet only.
+ * The dry gain is fixed at unity — wet adds on top so the user is
+ * always blending wet INTO the dry signal rather than crossfading.
+ */
+export function setBusReverbWet(level: number) {
+  if (!audioCtx || !busWet) init();
+  const v = Math.max(0, Math.min(1, level));
+  try {
+    busWet!.gain.cancelScheduledValues(audioCtx!.currentTime);
+    busWet!.gain.linearRampToValueAtTime(v, audioCtx!.currentTime + 0.03);
+  } catch { busWet!.gain.value = v; }
+  try { localStorage.setItem('ghost_bus_reverb_wet', String(v)); } catch { /* ignore */ }
+}
+
+export function getBusReverbWet(): number {
+  if (!busWet) init();
+  return busWet?.gain.value ?? 0;
 }
 
 /**
@@ -201,26 +349,31 @@ export function getReverbDecay(): number {
  * by the spec and produces a click-free transition because the old
  * tail's reverberant energy fades naturally as it convolves through.
  */
-export function setReverbDecay(seconds: number) {
-  if (!audioCtx || !reverbConvolver) init();
+export function setBusReverbDecay(seconds: number) {
+  if (!audioCtx || !busConvolver) init();
   const clamped = Math.max(0.1, Math.min(6, seconds));
-  reverbDecaySec = clamped;
-  reverbConvolver!.buffer = buildReverbIR(audioCtx!, clamped);
-  try { localStorage.setItem('ghost_reverb_decay', String(clamped)); } catch { /* ignore */ }
+  busDecaySec = clamped;
+  busConvolver!.buffer = buildReverbIR(audioCtx!, clamped);
+  try { localStorage.setItem('ghost_bus_reverb_decay', String(clamped)); } catch { /* ignore */ }
+}
+
+export function getBusReverbDecay(): number {
+  if (!busConvolver) init();
+  return busDecaySec;
 }
 
 /**
- * Entry point for every track / drum row. Connect into THIS node — under
- * the hood it lands on the mixer bus, which then runs through the master
- * fader to the destination. Same name as before so existing call sites
- * keep working without a refactor.
+ * Entry point for every track / drum row. Connect into THIS node —
+ * under the hood it lands on the FX bus input, which runs the channel
+ * strip (EQ → Comp → Reverb) before mixing into the master. Keeps the
+ * existing call-site name so refactor diffs are minimal.
  */
 export function getMaster(): GainNode {
-  if (!mixerBus) init();
-  return mixerBus!;
+  if (!fxBusInput) init();
+  return fxBusInput!;
 }
 
-/** Direct handle to the master fader, for a future master-volume UI. */
+/** Direct handle to the master fader, for the master-volume UI. */
 export function getMasterFader(): GainNode {
   if (!masterGain) init();
   return masterGain!;
@@ -229,7 +382,8 @@ export function getMasterFader(): GainNode {
 /**
  * Drum sub-bus. Drum row buffer sources connect their per-row gain →
  * per-row analyser → drumBus, so the drum-rack-lane meter sees the SUM
- * of every row through `getDrumAnalyser()`.
+ * of every row through `getDrumAnalyser()`. drumBus → fxBusInput so
+ * drum hits run through the same channel-strip FX as tracks.
  */
 export function getDrumBus(): GainNode {
   if (!drumBus) init();
@@ -289,32 +443,12 @@ export function ensureTrackCompressorWorklet(): Promise<void> {
 }
 
 /**
- * Try to construct a track-compressor AudioWorkletNode. Returns null if
- * the worklet hasn't loaded yet — callers should fall back to a plain
- * passthrough connection so the chain still produces audio while the
- * worklet finishes registering. Subsequent calls succeed once the
- * registration promise resolves.
- */
-export function createTrackCompressorNode(): AudioWorkletNode | null {
-  const ctx = getCtx();
-  try {
-    return new AudioWorkletNode(ctx, 'track-compressor', {
-      numberOfInputs: 1,
-      numberOfOutputs: 1,
-      outputChannelCount: [2],
-    });
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Construct a `warped-playback` AudioWorkletNode with the source buffer
  * already pushed across the message port. Returns the node + a small
  * controller wrapping its port so call sites don't have to know the
  * message protocol. Caller is responsible for connecting the node into
- * the graph (typically → trackGain → mixerBus) and for calling stop()
- * + disconnect() at the end of playback.
+ * the graph (typically → trackGain → trackPan → fxBusInput) and for
+ * calling stop() + disconnect() at the end of playback.
  */
 export interface WarpedPlaybackController {
   node: AudioWorkletNode;

@@ -21,13 +21,12 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackBpm = useAudioStore((s) => s.setTrackBpm);
   const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
-  const setTrackEq = useAudioStore((s) => s.setTrackEq);
-  const setTrackComp = useAudioStore((s) => s.setTrackComp);
-  const setTrackReverbSend = useAudioStore((s) => s.setTrackReverbSend);
-  const reverbReturn = useAudioStore((s) => s.reverbReturn);
-  const reverbDecay = useAudioStore((s) => s.reverbDecay);
-  const setReverbReturn = useAudioStore((s) => s.setReverbReturn);
-  const setReverbDecayAction = useAudioStore((s) => s.setReverbDecay);
+  const selectedBusId = useAudioStore((s) => s.selectedBusId);
+  const busFx = useAudioStore((s) => s.busFx);
+  const setBusEq = useAudioStore((s) => s.setBusEq);
+  const setBusComp = useAudioStore((s) => s.setBusComp);
+  const setBusReverbWet = useAudioStore((s) => s.setBusReverbWet);
+  const setBusReverbDecay = useAudioStore((s) => s.setBusReverbDecay);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // The panel operates on the WHOLE selection. Single click = one clip;
@@ -70,10 +69,27 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
     return true;
   };
 
+  // Bus FX panel — when the user clicks the master bus lane, render the
+  // channel strip horizontally (EQ → Comp → Reverb) instead of clip
+  // controls. This is the "click the bus track and the FX line up from
+  // left to right" surface.
+  if (selectedBusId) {
+    return <BusFxPanel
+      eq={busFx.eq}
+      comp={busFx.comp}
+      reverbWet={busFx.reverbWet}
+      reverbDecay={busFx.reverbDecay}
+      onEq={setBusEq}
+      onComp={setBusComp}
+      onReverbWet={setBusReverbWet}
+      onReverbDecay={setBusReverbDecay}
+    />;
+  }
+
   if (!trackId || !projectTrack) {
     return (
       <div className="shrink-0 h-[112px] mt-2 rounded-2xl glass flex items-center justify-center text-[11px] text-white/30 italic">
-        Click a clip to inspect it
+        Click a clip to inspect it — or click the bus to edit FX
       </div>
     );
   }
@@ -85,13 +101,6 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const volume = loaded?.volume ?? 1;
   const pitch = loaded?.pitch ?? 0;
   const pan = loaded?.pan ?? 0;
-  const eqLow = loaded?.eq?.low ?? 0;
-  const eqMid = loaded?.eq?.mid ?? 0;
-  const eqHigh = loaded?.eq?.high ?? 0;
-  const compThreshold = loaded?.comp?.threshold ?? 0;
-  const compRatio = loaded?.comp?.ratio ?? 1;
-  const compMakeup = loaded?.comp?.makeup ?? 0;
-  const reverbSend = loaded?.reverbSend ?? 0;
   const muted = loaded?.muted ?? false;
   const warp = loaded?.warp !== false;
   // Manual BPM override (loaded.bpm). Falls back to the file's detected
@@ -113,13 +122,6 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const mixedVolume = !allSameNumber((t) => t?.volume);
   const mixedPitch = !allSameNumber((t) => t?.pitch);
   const mixedPan = !allSameNumber((t) => t?.pan ?? 0);
-  const mixedEqLow = !allSameNumber((t) => t?.eq?.low ?? 0);
-  const mixedEqMid = !allSameNumber((t) => t?.eq?.mid ?? 0);
-  const mixedEqHigh = !allSameNumber((t) => t?.eq?.high ?? 0);
-  const mixedCompThreshold = !allSameNumber((t) => t?.comp?.threshold ?? 0);
-  const mixedCompRatio = !allSameNumber((t) => t?.comp?.ratio ?? 1);
-  const mixedCompMakeup = !allSameNumber((t) => t?.comp?.makeup ?? 0);
-  const mixedReverbSend = !allSameNumber((t) => t?.reverbSend ?? 0);
   const mixedMuted = !allSameBool((t) => !!t?.muted);
   const mixedWarp = !allSameBool((t) => t?.warp !== false);
   const mixedBpm = !allSameNumber((t) => t?.bpm || 0);
@@ -128,26 +130,6 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const applyVolume = (v: number) => ids.forEach((id) => setTrackVolume(id, v));
   const applyPitch = (v: number) => ids.forEach((id) => setTrackPitch(id, v));
   const applyPan = (v: number) => ids.forEach((id) => setTrackPan(id, v));
-  const applyEqBand = (band: 'low' | 'mid' | 'high', v: number) => ids.forEach((id) => {
-    const t = loadedTracks.get(id);
-    setTrackEq(id, {
-      low: band === 'low' ? v : (t?.eq?.low ?? 0),
-      mid: band === 'mid' ? v : (t?.eq?.mid ?? 0),
-      high: band === 'high' ? v : (t?.eq?.high ?? 0),
-    });
-  });
-  const applyReverbSend = (v: number) => ids.forEach((id) => setTrackReverbSend(id, v));
-  const applyCompField = (field: 'threshold' | 'ratio' | 'makeup', v: number) => ids.forEach((id) => {
-    const t = loadedTracks.get(id);
-    const cur = t?.comp ?? { threshold: 0, ratio: 1, attack: 0.003, release: 0.1, makeup: 0 };
-    setTrackComp(id, {
-      threshold: field === 'threshold' ? v : cur.threshold,
-      ratio: field === 'ratio' ? v : cur.ratio,
-      attack: cur.attack,
-      release: cur.release,
-      makeup: field === 'makeup' ? v : cur.makeup,
-    });
-  });
   const applyMute = (next: boolean) => ids.forEach((id) => setTrackMuted(id, next));
   const applyWarp = (next: boolean) => ids.forEach((id) => setTrackWarp(id, next));
   const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
@@ -265,126 +247,98 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
           format={(v) => Math.abs(v) < 0.005 ? 'C' : (v > 0 ? `R${Math.round(v * 100)}` : `L${Math.round(-v * 100)}`)}
           onChange={applyPan}
         />
-        {/* 3-band EQ — channel-strip style. Bands are fixed at 80 Hz
-            low shelf, 1 kHz mid peak, 8 kHz high shelf. 0 dB on every
-            band is transparent. */}
-        <div className="border-t border-white/[0.06] pt-2 mt-1 flex flex-col gap-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-white/35 font-semibold">EQ</div>
-          <Slider
-            label="Lo"
-            value={eqLow}
-            mixed={mixedEqLow}
-            min={-24}
-            max={24}
-            step={0.5}
-            defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => applyEqBand('low', v)}
-          />
-          <Slider
-            label="Md"
-            value={eqMid}
-            mixed={mixedEqMid}
-            min={-24}
-            max={24}
-            step={0.5}
-            defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => applyEqBand('mid', v)}
-          />
-          <Slider
-            label="Hi"
-            value={eqHigh}
-            mixed={mixedEqHigh}
-            min={-24}
-            max={24}
-            step={0.5}
-            defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => applyEqBand('high', v)}
-          />
-        </div>
-        {/* Compressor — feed-forward, hard knee. ratio = 1 is bypass
-            (worklet fast-paths through bit-perfect). Threshold + ratio
-            are the two knobs that matter; attack/release stay at
-            channel-strip defaults (3 ms / 100 ms). Makeup applies
-            post-compression to claw back perceived loudness. */}
-        <div className="border-t border-white/[0.06] pt-2 mt-1 flex flex-col gap-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-white/35 font-semibold">Comp</div>
-          <Slider
-            label="Th"
-            value={compThreshold}
-            mixed={mixedCompThreshold}
-            min={-60}
-            max={0}
-            step={0.5}
-            defaultValue={0}
-            format={(v) => `${v.toFixed(1)} dB`}
-            onChange={(v) => applyCompField('threshold', v)}
-          />
-          <Slider
-            label="Rt"
-            value={compRatio}
-            mixed={mixedCompRatio}
-            min={1}
-            max={20}
-            step={0.1}
-            defaultValue={1}
-            format={(v) => `${v.toFixed(1)}:1`}
-            onChange={(v) => applyCompField('ratio', v)}
-          />
-          <Slider
-            label="Mk"
-            value={compMakeup}
-            mixed={mixedCompMakeup}
-            min={-20}
-            max={20}
-            step={0.5}
-            defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => applyCompField('makeup', v)}
-          />
-        </div>
-        {/* Reverb send — per-track post-pan tap into the shared reverb
-            bus. The bus runs through one ConvolverNode (synthetic IR,
-            exponential-decay noise) and returns wet into the mixer.
-            Send is per-clip; Return + Decay are project-wide masters
-            so changing them re-tunes every send at once. */}
-        <div className="border-t border-white/[0.06] pt-2 mt-1 flex flex-col gap-1.5">
-          <div className="text-[9px] uppercase tracking-wider text-white/35 font-semibold">Reverb</div>
-          <Slider
-            label="Send"
-            value={reverbSend}
-            mixed={mixedReverbSend}
-            min={0}
-            max={1}
-            step={0.01}
-            defaultValue={0}
-            format={(v) => v < 0.005 ? 'off' : `${Math.round(v * 100)}%`}
-            onChange={applyReverbSend}
-          />
-          <Slider
-            label="Return"
-            value={reverbReturn}
-            min={0}
-            max={1}
-            step={0.01}
-            defaultValue={0.35}
-            format={(v) => `${Math.round(v * 100)}%`}
-            onChange={setReverbReturn}
-          />
-          <Slider
-            label="Decay"
-            value={reverbDecay}
-            min={0.1}
-            max={6}
-            step={0.05}
-            defaultValue={1.8}
-            format={(v) => `${v.toFixed(2)} s`}
-            onChange={setReverbDecayAction}
-          />
+        <div className="text-[9px] text-white/30 italic mt-2 leading-tight">
+          EQ / Comp / Reverb live on the Master Bus. Click the bus track to edit.
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Master FX bus channel-strip — EQ → Comp → Reverb laid out left-to-right.
+ * Each section is its own column so all the knobs are visible at once
+ * (rather than the per-clip vertical stack). The bus state mirrors the
+ * live ConvolverNode / BiquadFilters / compressor worklet, so dragging
+ * a slider takes effect on the next render quantum.
+ */
+function BusFxPanel({
+  eq, comp, reverbWet, reverbDecay,
+  onEq, onComp, onReverbWet, onReverbDecay,
+}: {
+  eq: { low: number; mid: number; high: number };
+  comp: { threshold: number; ratio: number; makeup: number };
+  reverbWet: number;
+  reverbDecay: number;
+  onEq: (band: 'low' | 'mid' | 'high', dB: number) => void;
+  onComp: (field: 'threshold' | 'ratio' | 'makeup', v: number) => void;
+  onReverbWet: (v: number) => void;
+  onReverbDecay: (v: number) => void;
+}) {
+  return (
+    <div className="shrink-0 h-[200px] mt-2 rounded-2xl glass flex overflow-hidden">
+      {/* Header column — bus identity, sits where the file-info column
+          sits in the per-clip view so the layout reads consistently. */}
+      <div className="shrink-0 w-[180px] flex flex-col gap-2 px-3 py-3 border-r border-white/[0.05]">
+        <div className="flex items-center gap-2">
+          <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#a855f7', boxShadow: '0 0 6px #a855f7' }} />
+          <span className="text-[12px] font-semibold text-white/90 uppercase tracking-wider">Master Bus</span>
+        </div>
+        <div className="text-[10px] text-white/45 leading-snug">
+          EQ → Compressor → Reverb. Every track that routes through the bus is processed by this chain.
+        </div>
+      </div>
+      {/* FX racks, left → right */}
+      <div className="flex-1 min-w-0 flex gap-3 px-3 py-3 overflow-x-auto">
+        <FxRack title="EQ" accent="#3b82f6">
+          <Slider label="Lo" value={eq.low} min={-24} max={24} step={0.5} defaultValue={0}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => onEq('low', v)} />
+          <Slider label="Md" value={eq.mid} min={-24} max={24} step={0.5} defaultValue={0}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => onEq('mid', v)} />
+          <Slider label="Hi" value={eq.high} min={-24} max={24} step={0.5} defaultValue={0}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => onEq('high', v)} />
+        </FxRack>
+        <FxRack title="Comp" accent="#22d3ee">
+          <Slider label="Th" value={comp.threshold} min={-60} max={0} step={0.5} defaultValue={0}
+            format={(v) => `${v.toFixed(1)} dB`}
+            onChange={(v) => onComp('threshold', v)} />
+          <Slider label="Rt" value={comp.ratio} min={1} max={20} step={0.1} defaultValue={1}
+            format={(v) => `${v.toFixed(1)}:1`}
+            onChange={(v) => onComp('ratio', v)} />
+          <Slider label="Mk" value={comp.makeup} min={-20} max={20} step={0.5} defaultValue={0}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => onComp('makeup', v)} />
+        </FxRack>
+        <FxRack title="Reverb" accent="#a855f7">
+          <Slider label="Wet" value={reverbWet} min={0} max={1} step={0.01} defaultValue={0}
+            format={(v) => v < 0.005 ? 'off' : `${Math.round(v * 100)}%`}
+            onChange={onReverbWet} />
+          <Slider label="Decay" value={reverbDecay} min={0.1} max={6} step={0.05} defaultValue={1.8}
+            format={(v) => `${v.toFixed(2)} s`}
+            onChange={onReverbDecay} />
+        </FxRack>
+      </div>
+    </div>
+  );
+}
+
+function FxRack({ title, accent, children }: { title: string; accent: string; children: React.ReactNode }) {
+  return (
+    <div
+      className="shrink-0 w-[180px] rounded-lg flex flex-col gap-2 px-3 py-2"
+      style={{
+        background: 'rgba(255,255,255,0.02)',
+        border: '1px solid rgba(255,255,255,0.06)',
+      }}
+    >
+      <div className="flex items-center gap-1.5">
+        <span className="w-1 h-1 rounded-full" style={{ background: accent, boxShadow: `0 0 4px ${accent}` }} />
+        <span className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: accent }}>{title}</span>
+      </div>
+      <div className="flex flex-col gap-1.5 flex-1">{children}</div>
     </div>
   );
 }

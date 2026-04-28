@@ -2,10 +2,16 @@ import { create } from 'zustand';
 import { api } from '../lib/api';
 import { PITCH_MIN, PITCH_MAX } from '../lib/constants';
 import { audioBufferCache, cacheBuffer, clearAudioCaches } from '../lib/audio';
-import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet, createTrackCompressorNode, getReverbBus, getReverbReturn, setReverbDecay as setReverbDecayGraph, type WarpedParams } from './audio/graph';
+import {
+  getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop,
+  ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet,
+  setBusEqBand, setBusCompParam, setBusReverbWet, setBusReverbDecay,
+  getBusEqBand, getBusCompParam, getBusReverbWet, getBusReverbDecay,
+  type WarpedParams,
+} from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
 import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOps';
-import type { LoadedTrack, UndoSnapshot, WarpMarker, TrackEq, TrackComp } from './audio/types';
+import type { LoadedTrack, UndoSnapshot, WarpMarker, BusFxState } from './audio/types';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
 /**
@@ -308,16 +314,16 @@ interface AudioState {
   stopSoloTrack: () => void;
   setTrackVolume: (trackId: string, volume: number) => void;
   setTrackPan: (trackId: string, pan: number) => void;
-  setTrackEq: (trackId: string, eq: TrackEq) => void;
-  setTrackComp: (trackId: string, comp: TrackComp) => void;
-  setTrackReverbSend: (trackId: string, send: number) => void;
-  setReverbReturn: (level: number) => void;
-  setReverbDecay: (seconds: number) => void;
-  // Reverb master state (read-only mirror of graph globals so React
-  // re-renders pick it up). Updated whenever setReverbReturn / setReverbDecay
-  // run — the graph nodes remain the source of truth.
-  reverbReturn: number;
-  reverbDecay: number;
+  // FX bus state mirrors graph nodes so React rerenders track changes.
+  // The graph nodes remain the source of truth; setBusFx* actions write
+  // both the graph node and this mirror.
+  busFx: BusFxState;
+  selectedBusId: string | null;
+  setSelectedBusId: (id: string | null) => void;
+  setBusEq: (band: 'low' | 'mid' | 'high', dB: number) => void;
+  setBusComp: (field: 'threshold' | 'ratio' | 'makeup', v: number) => void;
+  setBusReverbWet: (level: number) => void;
+  setBusReverbDecay: (seconds: number) => void;
   setTrackMuted: (trackId: string, muted: boolean) => void;
   removeTrack: (trackId: string) => void;
   loopTrackToFill: (trackId: string, fileId?: string) => void;
@@ -409,58 +415,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
       && !!track.originalBuffer;
   }
 
-  // Build the per-track 3-band EQ chain — low shelf @ 80 Hz, mid peak @
-  // 1 kHz, high shelf @ 8 kHz. Always inserted; at 0 dB on every band
-  // BiquadFilter is transparent so leaving it on for un-EQ'd tracks
-  // costs nothing audible. Returns the IN and OUT nodes so callers can
-  // splice the chain into source → eqIn → ... → eqOut → gain.
-  function buildEqChain(
-    ctx: AudioContext,
-    eq: TrackEq | undefined,
-  ): { inNode: BiquadFilterNode; outNode: BiquadFilterNode; low: BiquadFilterNode; mid: BiquadFilterNode; high: BiquadFilterNode } {
-    const low = ctx.createBiquadFilter();
-    low.type = 'lowshelf';
-    low.frequency.value = 80;
-    low.gain.value = eq?.low ?? 0;
-
-    const mid = ctx.createBiquadFilter();
-    mid.type = 'peaking';
-    mid.frequency.value = 1000;
-    mid.Q.value = 0.7;
-    mid.gain.value = eq?.mid ?? 0;
-
-    const high = ctx.createBiquadFilter();
-    high.type = 'highshelf';
-    high.frequency.value = 8000;
-    high.gain.value = eq?.high ?? 0;
-
-    low.connect(mid);
-    mid.connect(high);
-    return { inNode: low, outNode: high, low, mid, high };
-  }
-
-  // Apply a TrackComp to a live track-compressor worklet's k-rate
-  // params. Smooth via linearRampToValueAtTime so a slider drag
-  // doesn't zipper the audio.
-  function applyCompToNode(node: AudioWorkletNode, comp: TrackComp | undefined) {
-    const ctx = getCtx();
-    const t = ctx.currentTime + 0.03;
-    const c: TrackComp = comp ?? { threshold: 0, ratio: 1, attack: 0.003, release: 0.1, makeup: 0 };
-    const setParam = (name: string, v: number) => {
-      const p = (node.parameters as unknown as Map<string, AudioParam>).get(name);
-      if (!p) return;
-      try {
-        p.cancelScheduledValues(ctx.currentTime);
-        p.linearRampToValueAtTime(v, t);
-      } catch { p.value = v; }
-    };
-    setParam('threshold', c.threshold);
-    setParam('ratio', c.ratio);
-    setParam('attack', c.attack);
-    setParam('release', c.release);
-    setParam('makeup', c.makeup);
-  }
-
   function workletParamsFromTrack(track: LoadedTrack, projectBpm: number): WarpedParams {
     const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
     const warpActive = track.warp !== false && !!sourceBpm && sourceBpm > 0 && projectBpm > 0;
@@ -504,11 +458,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // Disconnect any prior analyser so the OLD node doesn't keep showing
       // a frozen reading after we restart playback.
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } }
-      // Disconnect the prior reverb send so it doesn't keep an orphan
-      // edge into the shared reverbBus after the upstream pan node is
-      // discarded — both the orphan and any post-stop input would
-      // otherwise sit on the bus until GC fires.
-      if (track.reverbSendNode) { try { track.reverbSendNode.disconnect(); } catch { /* ignore */ } track.reverbSendNode = null; }
 
       // Worklet path — tracks with warp markers play through the
       // streaming worklet so marker drags update audio in real time
@@ -520,37 +469,13 @@ export const useAudioStore = create<AudioState>((set, get) => {
           gain.gain.value = track.muted ? 0 : track.volume;
           const pan = ctx.createStereoPanner();
           pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
-          const eq = buildEqChain(ctx, track.eq);
-          const comp = createTrackCompressorNode();
-          if (comp) applyCompToNode(comp, track.comp);
-          controller.node.connect(eq.inNode);
-          // Compressor sits between EQ and gain. Falls back to direct
-          // EQ→gain if the worklet hasn't registered yet (silent on
-          // the first ~50 ms of app load).
-          if (comp) {
-            eq.outNode.connect(comp);
-            comp.connect(gain);
-          } else {
-            eq.outNode.connect(gain);
-          }
+          // Per-track audio path is now just: source → gain → pan → fxBusInput.
+          // EQ / Comp / Reverb live on the shared FX bus instead of per-track.
+          controller.node.connect(gain);
           gain.connect(pan);
           pan.connect(getMaster());
-          // Reverb send — taps off post-pan so the wet reverb hears the
-          // same stereo placement as the dry signal. sendNode.gain is
-          // the per-track send level; reverbBus → convolver → reverbReturn
-          // is the shared FX return path built once in graph.ts.
-          const send = ctx.createGain();
-          send.gain.value = Math.max(0, Math.min(1, track.reverbSend ?? 0));
-          pan.connect(send);
-          send.connect(getReverbBus());
-          track.reverbSendNode = send;
-          track.eqLowNode = eq.low;
-          track.eqMidNode = eq.mid;
-          track.eqHighNode = eq.high;
-          track.compNode = comp;
-          // Same parallel meter tap pattern as the BufferSource path —
-          // tap before pan so the meter reads the lane's sound rather
-          // than its stereo placement.
+          // Parallel meter tap — branches off gain so the meter reads
+          // the lane's pre-pan sound. Doesn't sit in the audio path.
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 256;
           analyser.smoothingTimeConstant = 0.6;
@@ -591,32 +516,12 @@ export const useAudioStore = create<AudioState>((set, get) => {
       gain.gain.value = track.muted ? 0 : track.volume;
       const pan = ctx.createStereoPanner();
       pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
-      const eq = buildEqChain(ctx, track.eq);
-      const comp = createTrackCompressorNode();
-      if (comp) applyCompToNode(comp, track.comp);
-      // Audio path: source → eq → compressor → gain → pan → mixer bus.
-      // The compressor is a worklet that fast-paths through (bit-perfect)
-      // when ratio = 1, so it's free to leave inserted on every track.
-      source.connect(eq.inNode);
-      if (comp) {
-        eq.outNode.connect(comp);
-        comp.connect(gain);
-      } else {
-        eq.outNode.connect(gain);
-      }
+      // Per-track path: source → gain → pan → fxBusInput. All FX live
+      // on the shared bus now — EQ / Comp / Reverb apply once at the
+      // bus level rather than per-track.
+      source.connect(gain);
       gain.connect(pan);
       pan.connect(getMaster());
-      // Reverb send — see worklet branch above for rationale. Same
-      // post-pan tap so the wet reverb mirrors stereo placement.
-      const send = ctx.createGain();
-      send.gain.value = Math.max(0, Math.min(1, track.reverbSend ?? 0));
-      pan.connect(send);
-      send.connect(getReverbBus());
-      track.reverbSendNode = send;
-      track.eqLowNode = eq.low;
-      track.eqMidNode = eq.mid;
-      track.eqHighNode = eq.high;
-      track.compNode = comp;
       // Meter tap — branches off the gain in PARALLEL so it does not sit
       // in the audio path. AnalyserNode is spec'd as transparent but
       // every node in series adds a render-quantum of latency and a
@@ -665,7 +570,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // path: worklet is recreated per-play, not persistent.
       disposeWorkletController(track);
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } track.analyser = null; }
-      if (track.reverbSendNode) { try { track.reverbSendNode.disconnect(); } catch { /* ignore */ } track.reverbSendNode = null; }
     });
   }
 
@@ -732,41 +636,25 @@ export const useAudioStore = create<AudioState>((set, get) => {
       try { window.localStorage?.setItem('ghost_master_volume', String(clamped)); } catch {}
       set({ masterVolume: clamped });
     },
-    // Reverb master state — initialised from the same localStorage values
+    // FX bus state — initialised from the same localStorage values
     // graph.ts seeded the actual nodes with, so the React store and the
-    // audio nodes start in sync. Subsequent setReverbReturn / setReverbDecay
-    // calls keep both sides aligned.
-    reverbReturn: (() => {
-      try {
-        const raw = window.localStorage?.getItem('ghost_reverb_return');
-        const v = raw ? parseFloat(raw) : NaN;
-        return isFinite(v) && v >= 0 && v <= 1.5 ? v : 0.35;
-      } catch { return 0.35; }
-    })(),
-    reverbDecay: (() => {
-      try {
-        const raw = window.localStorage?.getItem('ghost_reverb_decay');
-        const v = raw ? parseFloat(raw) : NaN;
-        return isFinite(v) && v >= 0.1 && v <= 6 ? v : 1.8;
-      } catch { return 1.8; }
-    })(),
-    setReverbReturn: (level) => {
-      const clamped = Math.max(0, Math.min(1.5, level));
-      const node = getReverbReturn();
-      try {
-        node.gain.cancelScheduledValues(getCtx().currentTime);
-        node.gain.linearRampToValueAtTime(clamped, getCtx().currentTime + 0.03);
-      } catch { node.gain.value = clamped; }
-      try { window.localStorage?.setItem('ghost_reverb_return', String(clamped)); } catch {}
-      set({ reverbReturn: clamped });
+    // audio nodes start in sync. setBusEq / setBusComp / setBusReverbWet /
+    // setBusReverbDecay actions keep both sides aligned thereafter.
+    busFx: {
+      eq: {
+        low: getBusEqBand('low'),
+        mid: getBusEqBand('mid'),
+        high: getBusEqBand('high'),
+      },
+      comp: {
+        threshold: getBusCompParam('threshold'),
+        ratio: getBusCompParam('ratio'),
+        makeup: getBusCompParam('makeup'),
+      },
+      reverbWet: getBusReverbWet(),
+      reverbDecay: getBusReverbDecay(),
     },
-    setReverbDecay: (seconds) => {
-      const clamped = Math.max(0.1, Math.min(6, seconds));
-      // Delegate to the graph helper — it regenerates the IR and persists
-      // the value. Mirror it into the React store so the slider reads back.
-      setReverbDecayGraph(clamped);
-      set({ reverbDecay: clamped });
-    },
+    selectedBusId: null,
     canUndo: false,
     canRedo: false,
     bufferVersion: 0,
@@ -777,17 +665,22 @@ export const useAudioStore = create<AudioState>((set, get) => {
     soloDuration: 0,
     loadError: null,
     selectedTrackIds: new Set<string>(),
-    setSelectedTrackIds: (ids) => set({ selectedTrackIds: new Set(ids) }),
+    setSelectedTrackIds: (ids) => {
+      const next = new Set(ids);
+      // Selecting a clip switches the editor panel out of bus-FX mode
+      // so the per-clip controls reappear.
+      set((s) => next.size > 0 ? { selectedTrackIds: next, selectedBusId: null } : { selectedTrackIds: next });
+    },
     toggleTrackSelection: (id) => set((s) => {
       const next = new Set(s.selectedTrackIds);
       if (next.has(id)) next.delete(id); else next.add(id);
-      return { selectedTrackIds: next };
+      return { selectedTrackIds: next, selectedBusId: null };
     }),
     addTrackToSelection: (id) => set((s) => {
       if (s.selectedTrackIds.has(id)) return {};
       const next = new Set(s.selectedTrackIds);
       next.add(id);
-      return { selectedTrackIds: next };
+      return { selectedTrackIds: next, selectedBusId: null };
     }),
     clearSelection: () => set({ selectedTrackIds: new Set() }),
     groupDragIds: new Set<string>(),
@@ -1088,59 +981,36 @@ export const useAudioStore = create<AudioState>((set, get) => {
       set({ loadedTracks: new Map(loadedTracks) });
     },
 
-    setTrackComp: (trackId, comp) => {
-      const { loadedTracks } = get();
-      const track = loadedTracks.get(trackId);
-      if (!track) return;
-      const next: TrackComp = {
-        threshold: Math.max(-60, Math.min(0, comp.threshold)),
-        ratio: Math.max(1, Math.min(20, comp.ratio)),
-        attack: Math.max(0.0001, Math.min(1, comp.attack)),
-        release: Math.max(0.001, Math.min(1, comp.release)),
-        makeup: Math.max(-20, Math.min(20, comp.makeup)),
-      };
-      track.comp = next;
-      if (track.compNode) applyCompToNode(track.compNode, next);
-      set({ loadedTracks: new Map(loadedTracks) });
-      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    setSelectedBusId: (id) => set({ selectedBusId: id }),
+
+    setBusEq: (band, dB) => {
+      setBusEqBand(band, dB);
+      set((s) => ({
+        busFx: {
+          ...s.busFx,
+          eq: { ...s.busFx.eq, [band]: getBusEqBand(band) },
+        },
+      }));
     },
 
-    setTrackEq: (trackId, eq) => {
-      const { loadedTracks } = get();
-      const track = loadedTracks.get(trackId);
-      if (!track) return;
-      const clamp = (v: number) => Math.max(-24, Math.min(24, v));
-      const next: TrackEq = {
-        low: clamp(eq.low ?? 0),
-        mid: clamp(eq.mid ?? 0),
-        high: clamp(eq.high ?? 0),
-      };
-      track.eq = next;
-      // Smooth the gain change on each band so a slider drag doesn't
-      // zipper. 30 ms ramp is below the perception threshold but kills
-      // the artifact.
-      try {
-        const ctx = getCtx();
-        const t = ctx.currentTime + 0.03;
-        if (track.eqLowNode) {
-          track.eqLowNode.gain.cancelScheduledValues(ctx.currentTime);
-          track.eqLowNode.gain.linearRampToValueAtTime(next.low, t);
-        }
-        if (track.eqMidNode) {
-          track.eqMidNode.gain.cancelScheduledValues(ctx.currentTime);
-          track.eqMidNode.gain.linearRampToValueAtTime(next.mid, t);
-        }
-        if (track.eqHighNode) {
-          track.eqHighNode.gain.cancelScheduledValues(ctx.currentTime);
-          track.eqHighNode.gain.linearRampToValueAtTime(next.high, t);
-        }
-      } catch {
-        if (track.eqLowNode) track.eqLowNode.gain.value = next.low;
-        if (track.eqMidNode) track.eqMidNode.gain.value = next.mid;
-        if (track.eqHighNode) track.eqHighNode.gain.value = next.high;
-      }
-      set({ loadedTracks: new Map(loadedTracks) });
-      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    setBusComp: (field, v) => {
+      setBusCompParam(field, v);
+      set((s) => ({
+        busFx: {
+          ...s.busFx,
+          comp: { ...s.busFx.comp, [field]: getBusCompParam(field) },
+        },
+      }));
+    },
+
+    setBusReverbWet: (level) => {
+      setBusReverbWet(level);
+      set((s) => ({ busFx: { ...s.busFx, reverbWet: getBusReverbWet() } }));
+    },
+
+    setBusReverbDecay: (seconds) => {
+      setBusReverbDecay(seconds);
+      set((s) => ({ busFx: { ...s.busFx, reverbDecay: getBusReverbDecay() } }));
     },
 
     setTrackPan: (trackId, pan) => {
@@ -1156,25 +1026,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
           track.panNode.pan.cancelScheduledValues(ctx.currentTime);
           track.panNode.pan.linearRampToValueAtTime(clamped, ctx.currentTime + 0.03);
         } catch { track.panNode.pan.value = clamped; }
-      }
-      set({ loadedTracks: new Map(loadedTracks) });
-      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
-    },
-
-    setTrackReverbSend: (trackId, send) => {
-      const { loadedTracks } = get();
-      const track = loadedTracks.get(trackId);
-      if (!track) return;
-      const clamped = Math.max(0, Math.min(1, send));
-      track.reverbSend = clamped;
-      // Smooth ramp on the send gain — same 30 ms anti-zipper window
-      // as every other channel-strip control.
-      if (track.reverbSendNode) {
-        try {
-          const ctx = getCtx();
-          track.reverbSendNode.gain.cancelScheduledValues(ctx.currentTime);
-          track.reverbSendNode.gain.linearRampToValueAtTime(clamped, ctx.currentTime + 0.03);
-        } catch { track.reverbSendNode.gain.value = clamped; }
       }
       set({ loadedTracks: new Map(loadedTracks) });
       window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
@@ -1481,9 +1332,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
           soloed: track.soloed,
           pitch: track.pitch,
           pan: track.pan,
-          eq: track.eq,
-          comp: track.comp,
-          reverbSend: track.reverbSend,
           bpm: track.bpm || undefined,
           warp: track.warp,
           warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
@@ -1533,16 +1381,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.pan = (clip as any).pan ?? 0;
           if (existing.panNode) {
             try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
-          }
-          existing.eq = (clip as any).eq;
-          if (existing.eqLowNode) try { existing.eqLowNode.gain.value = existing.eq?.low ?? 0; } catch { /* ignore */ }
-          if (existing.eqMidNode) try { existing.eqMidNode.gain.value = existing.eq?.mid ?? 0; } catch { /* ignore */ }
-          if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
-          existing.comp = (clip as any).comp;
-          if (existing.compNode) applyCompToNode(existing.compNode, existing.comp);
-          existing.reverbSend = (clip as any).reverbSend ?? 0;
-          if (existing.reverbSendNode) {
-            try { existing.reverbSendNode.gain.value = Math.max(0, Math.min(1, existing.reverbSend || 0)); } catch { /* ignore */ }
           }
           // Migrate old `number[]` format from the first warp-marker
           // commit into the new {sourceSec, bufferSec} object form.
@@ -1615,16 +1453,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.pan = (clip as any).pan ?? 0;
           if (existing.panNode) {
             try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
-          }
-          existing.eq = (clip as any).eq;
-          if (existing.eqLowNode) try { existing.eqLowNode.gain.value = existing.eq?.low ?? 0; } catch { /* ignore */ }
-          if (existing.eqMidNode) try { existing.eqMidNode.gain.value = existing.eq?.mid ?? 0; } catch { /* ignore */ }
-          if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
-          existing.comp = (clip as any).comp;
-          if (existing.compNode) applyCompToNode(existing.compNode, existing.comp);
-          existing.reverbSend = (clip as any).reverbSend ?? 0;
-          if (existing.reverbSendNode) {
-            try { existing.reverbSendNode.gain.value = Math.max(0, Math.min(1, existing.reverbSend || 0)); } catch { /* ignore */ }
           }
         } else if (clip.parentTrackId && clip.parentFileId) {
           const parentTrack = m.get(clip.parentTrackId);

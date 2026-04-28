@@ -32,6 +32,7 @@ import SocialFeed from '../social/SocialFeed';
 import TransportBar from '../audio/TransportBar';
 import { ArrangementDropZone, ArrangementScrollView, BarRuler, ArrangementPlayhead, DraggableTrackList } from '../project/ArrangementComponents';
 import MasterTrackLane from '../project/MasterTrackLane';
+import MasterBusLane from '../project/MasterBusLane';
 import ArrangementComments from '../project/ArrangementComments';
 import SampleEditorPanel from '../project/SampleEditorPanel';
 import DrumRackPanel from '../project/DrumRackPanel';
@@ -978,6 +979,7 @@ export default function PluginLayout() {
                                 fetchProject={fetchProject}
                                 members={members}
                               />
+                              <MasterBusLane trackZoom={trackZoom} />
                               <MasterTrackLane trackZoom={trackZoom} />
                               <ArrangementPlayhead />
                               <ArrangementComments projectId={selectedProjectId!} />
