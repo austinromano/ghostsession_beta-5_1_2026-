@@ -223,7 +223,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
 
       {/* Right: knobs (volume + pitch). Plain range inputs for now —
            swap for proper rotary knobs in a follow-up. */}
-      <div className="shrink-0 w-[180px] flex flex-col justify-center gap-3 px-3 py-2 border-l border-white/[0.05]">
+      <div className="shrink-0 w-[180px] flex flex-col gap-3 px-3 py-2 border-l border-white/[0.05] overflow-y-auto">
         <Slider
           label="Vol"
           value={volume}
