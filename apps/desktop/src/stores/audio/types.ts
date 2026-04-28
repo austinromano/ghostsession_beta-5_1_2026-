@@ -7,6 +7,12 @@ export interface LoadedTrack {
   // per-track audio amplitude in real time. Lives only while playing.
   analyser?: AnalyserNode | null;
   volume: number;
+  // Stereo position, -1 (full left) … 0 (centre) … +1 (full right).
+  // Optional in the type so existing call sites that build LoadedTracks
+  // before this field existed keep compiling — at runtime the audio
+  // store treats undefined as 0.
+  pan?: number;
+  panNode?: StereoPannerNode | null;
   muted: boolean;
   soloed: boolean;
   bpm: number;
@@ -70,6 +76,7 @@ export interface ArrangementClipState {
   trimEnd: number;
   startOffset: number;
   volume: number;
+  pan?: number;
   muted: boolean;
   soloed: boolean;
   pitch: number;

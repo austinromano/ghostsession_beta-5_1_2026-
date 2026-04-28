@@ -307,6 +307,7 @@ interface AudioState {
   playSoloTrack: (trackId: string) => void;
   stopSoloTrack: () => void;
   setTrackVolume: (trackId: string, volume: number) => void;
+  setTrackPan: (trackId: string, pan: number) => void;
   setTrackMuted: (trackId: string, muted: boolean) => void;
   removeTrack: (trackId: string) => void;
   loopTrackToFill: (trackId: string, fileId?: string) => void;
@@ -447,9 +448,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
           const controller = createWarpedPlaybackNode(track.originalBuffer!);
           const gain = ctx.createGain();
           gain.gain.value = track.muted ? 0 : track.volume;
+          const pan = ctx.createStereoPanner();
+          pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
           controller.node.connect(gain);
-          gain.connect(getMaster());
-          // Same parallel meter tap pattern as the BufferSource path.
+          gain.connect(pan);
+          pan.connect(getMaster());
+          // Same parallel meter tap pattern as the BufferSource path —
+          // tap before pan so the meter reads the lane's sound rather
+          // than its stereo placement.
           const analyser = ctx.createAnalyser();
           analyser.fftSize = 256;
           analyser.smoothingTimeConstant = 0.6;
@@ -457,6 +463,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           track.analyser = analyser;
           track.workletController = controller;
           track.gainNode = gain;
+          track.panNode = pan;
           controller.setParams(workletParamsFromTrack(track, projectBpm));
           // Same start-time math as the BufferSource branch — `offset`
           // is the project-time at which playback resumes; clips that
@@ -487,11 +494,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
       const gain = ctx.createGain();
       gain.gain.value = track.muted ? 0 : track.volume;
-      // Audio path is short and direct: source → gain → mixer bus. No
-      // node sits between the gain stage and the bus that could colour
-      // the signal.
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
+      // Audio path: source → gain → pan → mixer bus. StereoPannerNode
+      // is a built-in equal-power panner — same algorithm DAWs use for
+      // their channel-strip pan knobs.
       source.connect(gain);
-      gain.connect(getMaster());
+      gain.connect(pan);
+      pan.connect(getMaster());
       // Meter tap — branches off the gain in PARALLEL so it does not sit
       // in the audio path. AnalyserNode is spec'd as transparent but
       // every node in series adds a render-quantum of latency and a
@@ -511,6 +521,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
       track.source = source;
       track.gainNode = gain;
+      track.panNode = pan;
 
       if (projectTime >= trackStartsAt) {
         const elapsed = projectTime - trackStartsAt;
@@ -926,6 +937,24 @@ export const useAudioStore = create<AudioState>((set, get) => {
       set({ loadedTracks: new Map(loadedTracks) });
     },
 
+    setTrackPan: (trackId, pan) => {
+      const { loadedTracks } = get();
+      const track = loadedTracks.get(trackId);
+      if (!track) return;
+      const clamped = Math.max(-1, Math.min(1, pan));
+      track.pan = clamped;
+      // Smooth ramp over 30 ms so a slider drag doesn't zipper.
+      if (track.panNode) {
+        try {
+          const ctx = getCtx();
+          track.panNode.pan.cancelScheduledValues(ctx.currentTime);
+          track.panNode.pan.linearRampToValueAtTime(clamped, ctx.currentTime + 0.03);
+        } catch { track.panNode.pan.value = clamped; }
+      }
+      set({ loadedTracks: new Map(loadedTracks) });
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    },
+
     setTrackMuted: (trackId, muted) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
@@ -1226,6 +1255,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           muted: track.muted,
           soloed: track.soloed,
           pitch: track.pitch,
+          pan: track.pan,
           bpm: track.bpm || undefined,
           warp: track.warp,
           warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
@@ -1272,6 +1302,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.muted = clip.muted;
           existing.soloed = clip.soloed;
           existing.pitch = clip.pitch;
+          existing.pan = (clip as any).pan ?? 0;
+          if (existing.panNode) {
+            try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
+          }
           // Migrate old `number[]` format from the first warp-marker
           // commit into the new {sourceSec, bufferSec} object form.
           // bufferSec defaults to sourceSec * baseStretch so old markers
@@ -1340,6 +1374,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.muted = clip.muted;
           existing.soloed = clip.soloed;
           existing.pitch = clip.pitch;
+          existing.pan = (clip as any).pan ?? 0;
+          if (existing.panNode) {
+            try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
+          }
         } else if (clip.parentTrackId && clip.parentFileId) {
           const parentTrack = m.get(clip.parentTrackId);
           if (parentTrack) {

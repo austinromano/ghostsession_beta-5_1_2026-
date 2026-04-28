@@ -20,6 +20,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackPitch = useAudioStore((s) => s.setTrackPitch);
   const setTrackBpm = useAudioStore((s) => s.setTrackBpm);
   const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
+  const setTrackPan = useAudioStore((s) => s.setTrackPan);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // The panel operates on the WHOLE selection. Single click = one clip;
@@ -76,6 +77,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const durationSec = loaded?.buffer?.duration ?? 0;
   const volume = loaded?.volume ?? 1;
   const pitch = loaded?.pitch ?? 0;
+  const pan = loaded?.pan ?? 0;
   const muted = loaded?.muted ?? false;
   const warp = loaded?.warp !== false;
   // Manual BPM override (loaded.bpm). Falls back to the file's detected
@@ -96,6 +98,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   // still applies the new value to every clip.
   const mixedVolume = !allSameNumber((t) => t?.volume);
   const mixedPitch = !allSameNumber((t) => t?.pitch);
+  const mixedPan = !allSameNumber((t) => t?.pan ?? 0);
   const mixedMuted = !allSameBool((t) => !!t?.muted);
   const mixedWarp = !allSameBool((t) => t?.warp !== false);
   const mixedBpm = !allSameNumber((t) => t?.bpm || 0);
@@ -103,6 +106,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   // Fan-out helpers — every action runs against every selected clip.
   const applyVolume = (v: number) => ids.forEach((id) => setTrackVolume(id, v));
   const applyPitch = (v: number) => ids.forEach((id) => setTrackPitch(id, v));
+  const applyPan = (v: number) => ids.forEach((id) => setTrackPan(id, v));
   const applyMute = (next: boolean) => ids.forEach((id) => setTrackMuted(id, next));
   const applyWarp = (next: boolean) => ids.forEach((id) => setTrackWarp(id, next));
   const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
@@ -206,6 +210,16 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
           step={1}
           format={(v) => `${v >= 0 ? '+' : ''}${v} st`}
           onChange={applyPitch}
+        />
+        <Slider
+          label="Pan"
+          value={pan}
+          mixed={mixedPan}
+          min={-1}
+          max={1}
+          step={0.01}
+          format={(v) => Math.abs(v) < 0.005 ? 'C' : (v > 0 ? `R${Math.round(v * 100)}` : `L${Math.round(-v * 100)}`)}
+          onChange={applyPan}
         />
       </div>
     </div>
