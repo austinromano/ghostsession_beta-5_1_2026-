@@ -252,6 +252,61 @@ export default function PluginLayout() {
       localStorage.setItem(`editor-ui::${selectedProjectId}`, JSON.stringify({ ...existing, trackZoom }));
     } catch { /* ignore quota errors */ }
   }, [selectedProjectId, trackZoom]);
+
+  // Per-project clip selection persistence. Drives the green selection
+  // ring AND what populates the SampleEditorPanel below — without this,
+  // every project re-open lands on "click a clip to inspect it" and the
+  // user has to reselect to see warp markers / pitch / volume etc. for
+  // the clip they were working on.
+  const selectedTrackIds = useAudioStore((s) => s.selectedTrackIds);
+  const setSelectedTrackIds = useAudioStore((s) => s.setSelectedTrackIds);
+  const loadedTracks = useAudioStore((s) => s.loadedTracks);
+  const selectionRestoredFor = useRef<string | null>(null);
+
+  // Save: every time the user changes the selection, write it back to
+  // the per-project blob.
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    if (selectionRestoredFor.current !== selectedProjectId) return;
+    try {
+      const raw = localStorage.getItem(`editor-ui::${selectedProjectId}`);
+      const existing = raw ? JSON.parse(raw) : {};
+      localStorage.setItem(
+        `editor-ui::${selectedProjectId}`,
+        JSON.stringify({ ...existing, selectedTrackIds: Array.from(selectedTrackIds) }),
+      );
+    } catch { /* ignore quota errors */ }
+  }, [selectedProjectId, selectedTrackIds]);
+
+  // Restore: as soon as the audio store has loaded at least one track
+  // for the current project, replay the saved selection. Filtering by
+  // `loadedTracks.has(id)` drops stale ids whose tracks were deleted
+  // since last visit. The ref guard means we restore exactly once per
+  // project switch.
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    if (selectionRestoredFor.current === selectedProjectId) return;
+    if (loadedTracks.size === 0) return;
+    try {
+      const raw = localStorage.getItem(`editor-ui::${selectedProjectId}`);
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (Array.isArray(data.selectedTrackIds)) {
+          const valid = (data.selectedTrackIds as string[]).filter((id) => loadedTracks.has(id));
+          if (valid.length > 0) setSelectedTrackIds(valid);
+        }
+      }
+    } catch { /* ignore corrupt blob */ }
+    selectionRestoredFor.current = selectedProjectId;
+  }, [selectedProjectId, loadedTracks, setSelectedTrackIds]);
+
+  // Reset the restore guard whenever the user switches projects so the
+  // next project gets its own one-shot restore pass.
+  useEffect(() => {
+    if (selectionRestoredFor.current && selectionRestoredFor.current !== selectedProjectId) {
+      selectionRestoredFor.current = null;
+    }
+  }, [selectedProjectId]);
   const [onlineActivity, setOnlineActivity] = useState<Map<string, OnlineUser>>(new Map());
   const [showNotifs, setShowNotifs] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
