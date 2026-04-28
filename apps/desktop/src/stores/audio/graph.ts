@@ -153,8 +153,11 @@ function init() {
   busWet.connect(fxBusOut);
   fxBusOut.connect(mixerBus);
 
-  // Audio path — kept as short as possible.
-  drumBus.connect(fxBusInput);
+  // Audio path — kept as short as possible. Tracks and the drum bus
+  // route DRY to mixerBus directly. Per-track sendNodes (created in
+  // audioStore.startAllSources) tap into fxBusInput in parallel for
+  // FX'd signal — classic send/return architecture.
+  drumBus.connect(mixerBus);
   mixerBus.connect(masterGain);
   masterGain.connect(audioCtx.destination);
 
@@ -263,8 +266,10 @@ export function getCtx(): AudioContext {
 }
 
 /**
- * FX bus input — every track / drum row connects into THIS node. The bus
- * runs the EQ → Comp → Reverb chain and feeds the mixer.
+ * FX bus input — per-track sendNodes connect into THIS GainNode. The bus
+ * runs the EQ → Comp → Reverb chain and sums its output back into the
+ * mixer alongside the dry track signals. Tracks at busSend = 0 stay
+ * fully dry; turning the send up routes more of the track through the FX.
  */
 export function getFxBusInput(): GainNode {
   if (!fxBusInput) init();
@@ -363,14 +368,13 @@ export function getBusReverbDecay(): number {
 }
 
 /**
- * Entry point for every track / drum row. Connect into THIS node —
- * under the hood it lands on the FX bus input, which runs the channel
- * strip (EQ → Comp → Reverb) before mixing into the master. Keeps the
- * existing call-site name so refactor diffs are minimal.
+ * Entry point for the DRY track signal. Connect into THIS node — it's
+ * the mixer bus that feeds the master fader and the destination. The
+ * FX bus runs in parallel: per-track sendNodes feed it via getFxBusInput().
  */
 export function getMaster(): GainNode {
-  if (!fxBusInput) init();
-  return fxBusInput!;
+  if (!mixerBus) init();
+  return mixerBus!;
 }
 
 /** Direct handle to the master fader, for the master-volume UI. */

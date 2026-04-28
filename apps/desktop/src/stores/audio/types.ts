@@ -13,6 +13,11 @@ export interface LoadedTrack {
   // store treats undefined as 0.
   pan?: number;
   panNode?: StereoPannerNode | null;
+  // Per-track FX bus send level, 0..1. Drives sendNode.gain — the
+  // post-pan tap that feeds the master FX bus. 0 = dry only (track
+  // bypasses the bus entirely), 1 = full level into the bus's chain.
+  busSend?: number;
+  busSendNode?: GainNode | null;
   muted: boolean;
   soloed: boolean;
   bpm: number;
@@ -90,6 +95,7 @@ export interface ArrangementClipState {
   startOffset: number;
   volume: number;
   pan?: number;
+  busSend?: number;
   muted: boolean;
   soloed: boolean;
   pitch: number;

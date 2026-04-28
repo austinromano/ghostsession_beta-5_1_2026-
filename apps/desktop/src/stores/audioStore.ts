@@ -7,6 +7,7 @@ import {
   ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet,
   setBusEqBand, setBusCompParam, setBusReverbWet, setBusReverbDecay,
   getBusEqBand, getBusCompParam, getBusReverbWet, getBusReverbDecay,
+  getFxBusInput,
   type WarpedParams,
 } from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
@@ -314,6 +315,7 @@ interface AudioState {
   stopSoloTrack: () => void;
   setTrackVolume: (trackId: string, volume: number) => void;
   setTrackPan: (trackId: string, pan: number) => void;
+  setTrackBusSend: (trackId: string, send: number) => void;
   // FX bus state mirrors graph nodes so React rerenders track changes.
   // The graph nodes remain the source of truth; setBusFx* actions write
   // both the graph node and this mirror.
@@ -458,6 +460,9 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // Disconnect any prior analyser so the OLD node doesn't keep showing
       // a frozen reading after we restart playback.
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } }
+      // Disconnect prior bus-send so it doesn't keep an orphan edge into
+      // the shared FX bus after the upstream pan is discarded.
+      if (track.busSendNode) { try { track.busSendNode.disconnect(); } catch { /* ignore */ } track.busSendNode = null; }
 
       // Worklet path — tracks with warp markers play through the
       // streaming worklet so marker drags update audio in real time
@@ -469,11 +474,18 @@ export const useAudioStore = create<AudioState>((set, get) => {
           gain.gain.value = track.muted ? 0 : track.volume;
           const pan = ctx.createStereoPanner();
           pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
-          // Per-track audio path is now just: source → gain → pan → fxBusInput.
-          // EQ / Comp / Reverb live on the shared FX bus instead of per-track.
+          // Per-track audio path: source → gain → pan → mixerBus (DRY).
+          // Per-track sendNode taps post-pan into the FX bus in parallel
+          // (WET) so the user controls how much of each track gets
+          // processed by the bus's EQ → Comp → Reverb chain.
           controller.node.connect(gain);
           gain.connect(pan);
           pan.connect(getMaster());
+          const send = ctx.createGain();
+          send.gain.value = Math.max(0, Math.min(1, track.busSend ?? 0));
+          pan.connect(send);
+          send.connect(getFxBusInput());
+          track.busSendNode = send;
           // Parallel meter tap — branches off gain so the meter reads
           // the lane's pre-pan sound. Doesn't sit in the audio path.
           const analyser = ctx.createAnalyser();
@@ -516,12 +528,17 @@ export const useAudioStore = create<AudioState>((set, get) => {
       gain.gain.value = track.muted ? 0 : track.volume;
       const pan = ctx.createStereoPanner();
       pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
-      // Per-track path: source → gain → pan → fxBusInput. All FX live
-      // on the shared bus now — EQ / Comp / Reverb apply once at the
-      // bus level rather than per-track.
+      // Per-track path: source → gain → pan → mixerBus (DRY). The
+      // sendNode taps post-pan into the FX bus in parallel — track is
+      // dry by default, user opts in by raising the send knob.
       source.connect(gain);
       gain.connect(pan);
       pan.connect(getMaster());
+      const send = ctx.createGain();
+      send.gain.value = Math.max(0, Math.min(1, track.busSend ?? 0));
+      pan.connect(send);
+      send.connect(getFxBusInput());
+      track.busSendNode = send;
       // Meter tap — branches off the gain in PARALLEL so it does not sit
       // in the audio path. AnalyserNode is spec'd as transparent but
       // every node in series adds a render-quantum of latency and a
@@ -570,6 +587,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // path: worklet is recreated per-play, not persistent.
       disposeWorkletController(track);
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } track.analyser = null; }
+      if (track.busSendNode) { try { track.busSendNode.disconnect(); } catch { /* ignore */ } track.busSendNode = null; }
     });
   }
 
@@ -1031,6 +1049,23 @@ export const useAudioStore = create<AudioState>((set, get) => {
       window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
     },
 
+    setTrackBusSend: (trackId, send) => {
+      const { loadedTracks } = get();
+      const track = loadedTracks.get(trackId);
+      if (!track) return;
+      const clamped = Math.max(0, Math.min(1, send));
+      track.busSend = clamped;
+      if (track.busSendNode) {
+        try {
+          const ctx = getCtx();
+          track.busSendNode.gain.cancelScheduledValues(ctx.currentTime);
+          track.busSendNode.gain.linearRampToValueAtTime(clamped, ctx.currentTime + 0.03);
+        } catch { track.busSendNode.gain.value = clamped; }
+      }
+      set({ loadedTracks: new Map(loadedTracks) });
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    },
+
     setTrackMuted: (trackId, muted) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
@@ -1332,6 +1367,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           soloed: track.soloed,
           pitch: track.pitch,
           pan: track.pan,
+          busSend: track.busSend,
           bpm: track.bpm || undefined,
           warp: track.warp,
           warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
@@ -1379,6 +1415,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.soloed = clip.soloed;
           existing.pitch = clip.pitch;
           existing.pan = (clip as any).pan ?? 0;
+          existing.busSend = (clip as any).busSend ?? 0;
+          if (existing.busSendNode) {
+            try { existing.busSendNode.gain.value = Math.max(0, Math.min(1, existing.busSend || 0)); } catch { /* ignore */ }
+          }
           if (existing.panNode) {
             try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
           }
@@ -1451,6 +1491,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           existing.soloed = clip.soloed;
           existing.pitch = clip.pitch;
           existing.pan = (clip as any).pan ?? 0;
+          existing.busSend = (clip as any).busSend ?? 0;
+          if (existing.busSendNode) {
+            try { existing.busSendNode.gain.value = Math.max(0, Math.min(1, existing.busSend || 0)); } catch { /* ignore */ }
+          }
           if (existing.panNode) {
             try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
           }

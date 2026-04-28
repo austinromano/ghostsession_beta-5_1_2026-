@@ -96,7 +96,7 @@ function LaneLevelMeter({ trackIds }: { trackIds: string[] }) {
   );
 }
 
-function TrackHeader({ name, hue, isSelected, trackIds, meter }: {
+function TrackHeader({ name, hue, isSelected, trackIds, meter, controls }: {
   name: string;
   hue: number;
   isSelected?: boolean;
@@ -106,12 +106,86 @@ function TrackHeader({ name, hue, isSelected, trackIds, meter }: {
   // Pass <DrumRackLevelMeter /> or <DrumRowLevelMeter rowId=… /> for
   // lanes that aren't backed by per-track analysers.
   meter?: React.ReactNode;
+  // Optional Mute / Solo / FX-bus-send controls for regular track lanes.
+  // Drum rack and drum-row headers don't pass this; they keep the
+  // simple single-row layout.
+  controls?: {
+    muted: boolean;
+    soloed: boolean;
+    busSend: number;          // 0..1
+    onToggleMute: () => void;
+    onToggleSolo: () => void;
+    onSendChange: (v: number) => void;
+  };
 }) {
   // Solid block fill (FL Studio playlist style) — saturated colour, full
   // lane height, name across the top, accent dot on the right.
   const fill = `hsl(${hue}, 38%, 30%)`;
   const accent = `hsl(${hue}, 80%, 60%)`;
   const cleanName = name.replace(/\.(wav|mp3|flac|aiff|ogg|m4a|aac)$/i, '').replace(/_/g, ' ');
+
+  // When controls are provided, render the dense two-row layout: name +
+  // accent dot on top, M / S buttons + send slider + meter on bottom.
+  if (controls) {
+    return (
+      <div
+        className="relative shrink-0 select-none flex flex-col gap-0.5 px-1.5 py-1 rounded-l-md overflow-hidden"
+        style={{
+          width: TRACK_HEADER_WIDTH,
+          height: '100%',
+          background: fill,
+          borderRight: `2px solid ${accent}`,
+          boxShadow: isSelected ? `inset 0 0 0 1px ${accent}` : 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -1px 0 rgba(0,0,0,0.25)',
+        }}
+        title={cleanName}
+      >
+        <div className="flex items-center gap-1 min-h-0">
+          <span className="text-[10px] font-semibold text-white/95 truncate flex-1" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
+            {cleanName}
+          </span>
+          <span
+            className="shrink-0 w-1.5 h-1.5 rounded-full"
+            style={{ background: accent, boxShadow: `0 0 4px ${accent}` }}
+          />
+        </div>
+        <div className="flex items-center gap-1 mt-auto" onPointerDown={(e) => e.stopPropagation()}>
+          <button
+            onClick={(e) => { e.stopPropagation(); controls.onToggleMute(); }}
+            className="w-4 h-4 flex items-center justify-center rounded text-[8px] font-bold transition-colors"
+            style={{
+              background: controls.muted ? 'rgba(239,68,68,0.7)' : 'rgba(0,0,0,0.35)',
+              color: controls.muted ? '#fff' : 'rgba(255,255,255,0.7)',
+            }}
+            title={controls.muted ? 'Unmute' : 'Mute'}
+          >M</button>
+          <button
+            onClick={(e) => { e.stopPropagation(); controls.onToggleSolo(); }}
+            className="w-4 h-4 flex items-center justify-center rounded text-[8px] font-bold transition-colors"
+            style={{
+              background: controls.soloed ? 'rgba(250,204,21,0.85)' : 'rgba(0,0,0,0.35)',
+              color: controls.soloed ? '#000' : 'rgba(255,255,255,0.7)',
+            }}
+            title={controls.soloed ? 'Unsolo' : 'Solo'}
+          >S</button>
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={controls.busSend}
+            onChange={(e) => controls.onSendChange(parseFloat(e.target.value))}
+            onDoubleClick={(e) => { e.stopPropagation(); controls.onSendChange(0); }}
+            onClick={(e) => e.stopPropagation()}
+            className="flex-1 h-1 cursor-pointer accent-white"
+            style={{ minWidth: 0 }}
+            title={`FX bus send — ${Math.round(controls.busSend * 100)}%. Double-click to reset.`}
+          />
+          {meter ?? <LaneLevelMeter trackIds={trackIds} />}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div
       className="relative shrink-0 select-none flex items-center gap-1.5 px-2 rounded-l-md overflow-hidden"
@@ -1378,6 +1452,8 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
   const hue = laneHueForKey(laneKey);
   const laneName = laneTracks[0]?.name || 'Track';
   const setTrackMuted = useAudioStore((s) => s.setTrackMuted);
+  const setTrackSoloed = useAudioStore((s) => s.setTrackSoloed);
+  const setTrackBusSend = useAudioStore((s) => s.setTrackBusSend);
   // True if every clip in this lane is currently muted — drives the
   // menu toggle's checkmark + label.
   const laneIsMuted = useAudioStore((s) => {
@@ -1385,6 +1461,25 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
     if (ids.length === 0) return false;
     return ids.every((id: string) => s.loadedTracks.get(id)?.muted === true);
   });
+  // Lane-level solo/send mirrors the FIRST loaded clip in the lane —
+  // every other clip in the same lane gets the same value when the user
+  // toggles. Picking "first clip" matches how mute already works.
+  const laneIsSoloed = useAudioStore((s) => {
+    const first = laneTracks[0]?.id;
+    return first ? s.loadedTracks.get(first)?.soloed === true : false;
+  });
+  const laneBusSend = useAudioStore((s) => {
+    const first = laneTracks[0]?.id;
+    return first ? (s.loadedTracks.get(first)?.busSend ?? 0) : 0;
+  });
+  const toggleLaneSolo = () => {
+    const target = !laneIsSoloed;
+    for (const t of laneTracks) setTrackSoloed(t.id, target);
+    window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+  };
+  const setLaneBusSend = (v: number) => {
+    for (const t of laneTracks) setTrackBusSend(t.id, v);
+  };
   // Right-click menu on the header (anchor in screen coords).
   const [headerMenu, setHeaderMenu] = useState<{ x: number; y: number } | null>(null);
   useEffect(() => {
@@ -1444,7 +1539,20 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
         className="h-full flex"
         style={{ cursor: 'grab' }}
       >
-        <TrackHeader name={laneName} hue={hue} trackIds={laneTracks.map((t: any) => t.id)} isSelected={laneIsMuted} />
+        <TrackHeader
+          name={laneName}
+          hue={hue}
+          trackIds={laneTracks.map((t: any) => t.id)}
+          isSelected={laneIsMuted}
+          controls={{
+            muted: laneIsMuted,
+            soloed: laneIsSoloed,
+            busSend: laneBusSend,
+            onToggleMute: toggleLaneMute,
+            onToggleSolo: toggleLaneSolo,
+            onSendChange: setLaneBusSend,
+          }}
+        />
       </div>
       <div
         className="relative rounded-r-lg flex-1"
