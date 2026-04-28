@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../lib/api';
 import { PITCH_MIN, PITCH_MAX } from '../lib/constants';
 import { audioBufferCache, cacheBuffer, clearAudioCaches } from '../lib/audio';
-import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet, createTrackCompressorNode, type WarpedParams } from './audio/graph';
+import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet, createTrackCompressorNode, getReverbBus, getReverbReturn, setReverbDecay as setReverbDecayGraph, type WarpedParams } from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
 import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOps';
 import type { LoadedTrack, UndoSnapshot, WarpMarker, TrackEq, TrackComp } from './audio/types';
@@ -310,6 +310,14 @@ interface AudioState {
   setTrackPan: (trackId: string, pan: number) => void;
   setTrackEq: (trackId: string, eq: TrackEq) => void;
   setTrackComp: (trackId: string, comp: TrackComp) => void;
+  setTrackReverbSend: (trackId: string, send: number) => void;
+  setReverbReturn: (level: number) => void;
+  setReverbDecay: (seconds: number) => void;
+  // Reverb master state (read-only mirror of graph globals so React
+  // re-renders pick it up). Updated whenever setReverbReturn / setReverbDecay
+  // run — the graph nodes remain the source of truth.
+  reverbReturn: number;
+  reverbDecay: number;
   setTrackMuted: (trackId: string, muted: boolean) => void;
   removeTrack: (trackId: string) => void;
   loopTrackToFill: (trackId: string, fileId?: string) => void;
@@ -496,6 +504,11 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // Disconnect any prior analyser so the OLD node doesn't keep showing
       // a frozen reading after we restart playback.
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } }
+      // Disconnect the prior reverb send so it doesn't keep an orphan
+      // edge into the shared reverbBus after the upstream pan node is
+      // discarded — both the orphan and any post-stop input would
+      // otherwise sit on the bus until GC fires.
+      if (track.reverbSendNode) { try { track.reverbSendNode.disconnect(); } catch { /* ignore */ } track.reverbSendNode = null; }
 
       // Worklet path — tracks with warp markers play through the
       // streaming worklet so marker drags update audio in real time
@@ -522,6 +535,15 @@ export const useAudioStore = create<AudioState>((set, get) => {
           }
           gain.connect(pan);
           pan.connect(getMaster());
+          // Reverb send — taps off post-pan so the wet reverb hears the
+          // same stereo placement as the dry signal. sendNode.gain is
+          // the per-track send level; reverbBus → convolver → reverbReturn
+          // is the shared FX return path built once in graph.ts.
+          const send = ctx.createGain();
+          send.gain.value = Math.max(0, Math.min(1, track.reverbSend ?? 0));
+          pan.connect(send);
+          send.connect(getReverbBus());
+          track.reverbSendNode = send;
           track.eqLowNode = eq.low;
           track.eqMidNode = eq.mid;
           track.eqHighNode = eq.high;
@@ -584,6 +606,13 @@ export const useAudioStore = create<AudioState>((set, get) => {
       }
       gain.connect(pan);
       pan.connect(getMaster());
+      // Reverb send — see worklet branch above for rationale. Same
+      // post-pan tap so the wet reverb mirrors stereo placement.
+      const send = ctx.createGain();
+      send.gain.value = Math.max(0, Math.min(1, track.reverbSend ?? 0));
+      pan.connect(send);
+      send.connect(getReverbBus());
+      track.reverbSendNode = send;
       track.eqLowNode = eq.low;
       track.eqMidNode = eq.mid;
       track.eqHighNode = eq.high;
@@ -636,6 +665,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // path: worklet is recreated per-play, not persistent.
       disposeWorkletController(track);
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } track.analyser = null; }
+      if (track.reverbSendNode) { try { track.reverbSendNode.disconnect(); } catch { /* ignore */ } track.reverbSendNode = null; }
     });
   }
 
@@ -701,6 +731,41 @@ export const useAudioStore = create<AudioState>((set, get) => {
       } catch { fader.gain.value = clamped; }
       try { window.localStorage?.setItem('ghost_master_volume', String(clamped)); } catch {}
       set({ masterVolume: clamped });
+    },
+    // Reverb master state — initialised from the same localStorage values
+    // graph.ts seeded the actual nodes with, so the React store and the
+    // audio nodes start in sync. Subsequent setReverbReturn / setReverbDecay
+    // calls keep both sides aligned.
+    reverbReturn: (() => {
+      try {
+        const raw = window.localStorage?.getItem('ghost_reverb_return');
+        const v = raw ? parseFloat(raw) : NaN;
+        return isFinite(v) && v >= 0 && v <= 1.5 ? v : 0.35;
+      } catch { return 0.35; }
+    })(),
+    reverbDecay: (() => {
+      try {
+        const raw = window.localStorage?.getItem('ghost_reverb_decay');
+        const v = raw ? parseFloat(raw) : NaN;
+        return isFinite(v) && v >= 0.1 && v <= 6 ? v : 1.8;
+      } catch { return 1.8; }
+    })(),
+    setReverbReturn: (level) => {
+      const clamped = Math.max(0, Math.min(1.5, level));
+      const node = getReverbReturn();
+      try {
+        node.gain.cancelScheduledValues(getCtx().currentTime);
+        node.gain.linearRampToValueAtTime(clamped, getCtx().currentTime + 0.03);
+      } catch { node.gain.value = clamped; }
+      try { window.localStorage?.setItem('ghost_reverb_return', String(clamped)); } catch {}
+      set({ reverbReturn: clamped });
+    },
+    setReverbDecay: (seconds) => {
+      const clamped = Math.max(0.1, Math.min(6, seconds));
+      // Delegate to the graph helper — it regenerates the IR and persists
+      // the value. Mirror it into the React store so the slider reads back.
+      setReverbDecayGraph(clamped);
+      set({ reverbDecay: clamped });
     },
     canUndo: false,
     canRedo: false,
@@ -1096,6 +1161,25 @@ export const useAudioStore = create<AudioState>((set, get) => {
       window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
     },
 
+    setTrackReverbSend: (trackId, send) => {
+      const { loadedTracks } = get();
+      const track = loadedTracks.get(trackId);
+      if (!track) return;
+      const clamped = Math.max(0, Math.min(1, send));
+      track.reverbSend = clamped;
+      // Smooth ramp on the send gain — same 30 ms anti-zipper window
+      // as every other channel-strip control.
+      if (track.reverbSendNode) {
+        try {
+          const ctx = getCtx();
+          track.reverbSendNode.gain.cancelScheduledValues(ctx.currentTime);
+          track.reverbSendNode.gain.linearRampToValueAtTime(clamped, ctx.currentTime + 0.03);
+        } catch { track.reverbSendNode.gain.value = clamped; }
+      }
+      set({ loadedTracks: new Map(loadedTracks) });
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    },
+
     setTrackMuted: (trackId, muted) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
@@ -1399,6 +1483,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           pan: track.pan,
           eq: track.eq,
           comp: track.comp,
+          reverbSend: track.reverbSend,
           bpm: track.bpm || undefined,
           warp: track.warp,
           warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
@@ -1455,6 +1540,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
           existing.comp = (clip as any).comp;
           if (existing.compNode) applyCompToNode(existing.compNode, existing.comp);
+          existing.reverbSend = (clip as any).reverbSend ?? 0;
+          if (existing.reverbSendNode) {
+            try { existing.reverbSendNode.gain.value = Math.max(0, Math.min(1, existing.reverbSend || 0)); } catch { /* ignore */ }
+          }
           // Migrate old `number[]` format from the first warp-marker
           // commit into the new {sourceSec, bufferSec} object form.
           // bufferSec defaults to sourceSec * baseStretch so old markers
@@ -1533,6 +1622,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
           existing.comp = (clip as any).comp;
           if (existing.compNode) applyCompToNode(existing.compNode, existing.comp);
+          existing.reverbSend = (clip as any).reverbSend ?? 0;
+          if (existing.reverbSendNode) {
+            try { existing.reverbSendNode.gain.value = Math.max(0, Math.min(1, existing.reverbSend || 0)); } catch { /* ignore */ }
+          }
         } else if (clip.parentTrackId && clip.parentFileId) {
           const parentTrack = m.get(clip.parentTrackId);
           if (parentTrack) {

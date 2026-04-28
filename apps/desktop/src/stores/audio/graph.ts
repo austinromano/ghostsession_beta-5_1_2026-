@@ -5,8 +5,16 @@ import { FFT_SIZE, SMOOTHING_TIME_CONSTANT } from '../../lib/constants';
  *
  *   Track / drum source → trackGain ─┐
  *                                    ├──→ mixerBus → masterGain ──→ destination
- *   Track / drum source → trackGain ─┘                            ↘
- *                                                                   masterAnalyser  (parallel meter — does NOT chain on)
+ *   Track / drum source → trackGain ─┘                ↑          ↘
+ *                                                     │            masterAnalyser  (parallel meter)
+ *                          per-track sendNode ───→ reverbBus → convolver → reverbReturn ─┘
+ *
+ * Reverb send bus is the channel-strip's first FX return — every track has
+ * a per-track sendNode tapped post-pan that feeds a single shared
+ * convolver. The wet output mixes back into the mixer bus through a
+ * reverbReturn fader so the user can blend wet vs. dry on the master
+ * without re-tweaking every send. ConvolverNode IR is generated
+ * synthetically (exponential-decay noise) so we don't ship an IR file.
  *
  * Three reasons this matters:
  *   1. Single mixer bus is the natural place to hang sends, FX returns, and
@@ -34,6 +42,13 @@ let masterLimiter: AudioWorkletNode | null = null;
 // parallel without affecting the audio path.
 let drumBus: GainNode | null = null;
 let drumAnalyser: AnalyserNode | null = null;
+// Reverb send bus — every per-track sendNode connects into reverbBus,
+// which feeds a single shared ConvolverNode. The wet output runs through
+// reverbReturn (a master wet-level fader) and mixes back into mixerBus.
+let reverbBus: GainNode | null = null;
+let reverbConvolver: ConvolverNode | null = null;
+let reverbReturn: GainNode | null = null;
+let reverbDecaySec = 1.8; // current IR decay length — drives regenerateReverbIR()
 
 function init() {
   // `latencyHint: 'playback'` lets the browser allocate larger buffers and
@@ -66,6 +81,34 @@ function init() {
   drumAnalyser = audioCtx.createAnalyser();
   drumAnalyser.fftSize = FFT_SIZE;
   drumAnalyser.smoothingTimeConstant = SMOOTHING_TIME_CONSTANT;
+
+  // Reverb send bus + return path. Built once at graph init so per-track
+  // sends can connect into reverbBus the moment a track starts playing.
+  reverbBus = audioCtx.createGain();
+  reverbBus.gain.value = 1; // bus-level trim, fixed at unity for now
+  reverbConvolver = audioCtx.createConvolver();
+  reverbConvolver.normalize = true;
+  reverbReturn = audioCtx.createGain();
+  // Persisted master wet-return level. 0.35 default — enough to be
+  // audible when the user pushes any send up but quiet enough that it
+  // doesn't dominate at moderate send levels.
+  let savedReverbReturn = 0.35;
+  try {
+    const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem('ghost_reverb_return') : null;
+    const v = raw ? parseFloat(raw) : NaN;
+    if (isFinite(v) && v >= 0 && v <= 1.5) savedReverbReturn = v;
+  } catch { /* default 0.35 */ }
+  reverbReturn.gain.value = savedReverbReturn;
+  // Persisted decay length. Drives the synthetic IR — regenerated below.
+  try {
+    const raw = (typeof localStorage !== 'undefined') ? localStorage.getItem('ghost_reverb_decay') : null;
+    const v = raw ? parseFloat(raw) : NaN;
+    if (isFinite(v) && v >= 0.1 && v <= 6) reverbDecaySec = v;
+  } catch { /* default 1.8 */ }
+  reverbConvolver.buffer = buildReverbIR(audioCtx, reverbDecaySec);
+  reverbBus.connect(reverbConvolver);
+  reverbConvolver.connect(reverbReturn);
+  reverbReturn.connect(mixerBus);
 
   // Audio path — kept as short as possible.
   drumBus.connect(mixerBus);
@@ -105,9 +148,65 @@ function init() {
   });
 }
 
+/**
+ * Generate a synthetic stereo impulse response — exponentially-decaying
+ * white noise. Cheap, fileless, and tweakable in real time. Decoupled
+ * left/right channels give the reverb a natural stereo width.
+ */
+function buildReverbIR(ctx: AudioContext, decaySec: number): AudioBuffer {
+  const sampleRate = ctx.sampleRate;
+  const length = Math.max(1, Math.floor(decaySec * sampleRate));
+  const ir = ctx.createBuffer(2, length, sampleRate);
+  for (let ch = 0; ch < 2; ch++) {
+    const data = ir.getChannelData(ch);
+    for (let i = 0; i < length; i++) {
+      // Exponential decay envelope, 60 dB drop over decaySec — a
+      // standard "RT60-shaped" tail. Random noise gives a dense diffuse
+      // reverb without needing early reflections.
+      const t = i / length;
+      const env = Math.pow(1 - t, 3);
+      data[i] = (Math.random() * 2 - 1) * env;
+    }
+  }
+  return ir;
+}
+
 export function getCtx(): AudioContext {
   if (!audioCtx) init();
   return audioCtx!;
+}
+
+/** Reverb send bus — per-track sendNodes connect into THIS GainNode. */
+export function getReverbBus(): GainNode {
+  if (!reverbBus) init();
+  return reverbBus!;
+}
+
+/** Master wet-return fader for the reverb bus. */
+export function getReverbReturn(): GainNode {
+  if (!reverbReturn) init();
+  return reverbReturn!;
+}
+
+/** Current reverb decay length, in seconds. */
+export function getReverbDecay(): number {
+  if (!reverbConvolver) init();
+  return reverbDecaySec;
+}
+
+/**
+ * Regenerate the convolver IR for a new decay length. Cheap — a fresh
+ * IR for a 5-second tail at 48 kHz is ~1 MB and takes a few ms to
+ * synthesise. Swapping the buffer on a live ConvolverNode is supported
+ * by the spec and produces a click-free transition because the old
+ * tail's reverberant energy fades naturally as it convolves through.
+ */
+export function setReverbDecay(seconds: number) {
+  if (!audioCtx || !reverbConvolver) init();
+  const clamped = Math.max(0.1, Math.min(6, seconds));
+  reverbDecaySec = clamped;
+  reverbConvolver!.buffer = buildReverbIR(audioCtx!, clamped);
+  try { localStorage.setItem('ghost_reverb_decay', String(clamped)); } catch { /* ignore */ }
 }
 
 /**

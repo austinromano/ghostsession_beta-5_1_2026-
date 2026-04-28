@@ -27,6 +27,10 @@ export interface LoadedTrack {
   // worklet still inserts but defaults to ratio=1, which is bypass).
   comp?: TrackComp;
   compNode?: AudioWorkletNode | null;
+  // Per-track reverb send level, 0..1. Drives sendNode.gain — the post-pan
+  // tap that feeds the shared reverb bus. 0 = dry only.
+  reverbSend?: number;
+  reverbSendNode?: GainNode | null;
   muted: boolean;
   soloed: boolean;
   bpm: number;
@@ -119,6 +123,7 @@ export interface ArrangementClipState {
   pan?: number;
   eq?: TrackEq;
   comp?: TrackComp;
+  reverbSend?: number;
   muted: boolean;
   soloed: boolean;
   pitch: number;

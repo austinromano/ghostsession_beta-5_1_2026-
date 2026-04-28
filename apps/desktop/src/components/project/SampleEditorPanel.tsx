@@ -23,6 +23,11 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
   const setTrackEq = useAudioStore((s) => s.setTrackEq);
   const setTrackComp = useAudioStore((s) => s.setTrackComp);
+  const setTrackReverbSend = useAudioStore((s) => s.setTrackReverbSend);
+  const reverbReturn = useAudioStore((s) => s.reverbReturn);
+  const reverbDecay = useAudioStore((s) => s.reverbDecay);
+  const setReverbReturn = useAudioStore((s) => s.setReverbReturn);
+  const setReverbDecayAction = useAudioStore((s) => s.setReverbDecay);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // The panel operates on the WHOLE selection. Single click = one clip;
@@ -86,6 +91,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const compThreshold = loaded?.comp?.threshold ?? 0;
   const compRatio = loaded?.comp?.ratio ?? 1;
   const compMakeup = loaded?.comp?.makeup ?? 0;
+  const reverbSend = loaded?.reverbSend ?? 0;
   const muted = loaded?.muted ?? false;
   const warp = loaded?.warp !== false;
   // Manual BPM override (loaded.bpm). Falls back to the file's detected
@@ -113,6 +119,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const mixedCompThreshold = !allSameNumber((t) => t?.comp?.threshold ?? 0);
   const mixedCompRatio = !allSameNumber((t) => t?.comp?.ratio ?? 1);
   const mixedCompMakeup = !allSameNumber((t) => t?.comp?.makeup ?? 0);
+  const mixedReverbSend = !allSameNumber((t) => t?.reverbSend ?? 0);
   const mixedMuted = !allSameBool((t) => !!t?.muted);
   const mixedWarp = !allSameBool((t) => t?.warp !== false);
   const mixedBpm = !allSameNumber((t) => t?.bpm || 0);
@@ -129,6 +136,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
       high: band === 'high' ? v : (t?.eq?.high ?? 0),
     });
   });
+  const applyReverbSend = (v: number) => ids.forEach((id) => setTrackReverbSend(id, v));
   const applyCompField = (field: 'threshold' | 'ratio' | 'makeup', v: number) => ids.forEach((id) => {
     const t = loadedTracks.get(id);
     const cur = t?.comp ?? { threshold: 0, ratio: 1, attack: 0.003, release: 0.1, makeup: 0 };
@@ -335,6 +343,45 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
             defaultValue={0}
             format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
             onChange={(v) => applyCompField('makeup', v)}
+          />
+        </div>
+        {/* Reverb send — per-track post-pan tap into the shared reverb
+            bus. The bus runs through one ConvolverNode (synthetic IR,
+            exponential-decay noise) and returns wet into the mixer.
+            Send is per-clip; Return + Decay are project-wide masters
+            so changing them re-tunes every send at once. */}
+        <div className="border-t border-white/[0.06] pt-2 mt-1 flex flex-col gap-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-white/35 font-semibold">Reverb</div>
+          <Slider
+            label="Send"
+            value={reverbSend}
+            mixed={mixedReverbSend}
+            min={0}
+            max={1}
+            step={0.01}
+            defaultValue={0}
+            format={(v) => v < 0.005 ? 'off' : `${Math.round(v * 100)}%`}
+            onChange={applyReverbSend}
+          />
+          <Slider
+            label="Return"
+            value={reverbReturn}
+            min={0}
+            max={1}
+            step={0.01}
+            defaultValue={0.35}
+            format={(v) => `${Math.round(v * 100)}%`}
+            onChange={setReverbReturn}
+          />
+          <Slider
+            label="Decay"
+            value={reverbDecay}
+            min={0.1}
+            max={6}
+            step={0.05}
+            defaultValue={1.8}
+            format={(v) => `${v.toFixed(2)} s`}
+            onChange={setReverbDecayAction}
           />
         </div>
       </div>
