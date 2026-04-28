@@ -13,6 +13,14 @@ export interface LoadedTrack {
   // store treats undefined as 0.
   pan?: number;
   panNode?: StereoPannerNode | null;
+  // Per-track 3-band channel-strip EQ. Three BiquadFilterNodes wired
+  // in series before the trackGain. Optional in the type so existing
+  // call sites that build LoadedTrack inline keep compiling — the
+  // audio store treats undefined as the transparent default.
+  eq?: TrackEq;
+  eqLowNode?: BiquadFilterNode | null;
+  eqMidNode?: BiquadFilterNode | null;
+  eqHighNode?: BiquadFilterNode | null;
   muted: boolean;
   soloed: boolean;
   bpm: number;
@@ -64,6 +72,19 @@ export interface WarpMarker {
   bufferSec: number;
 }
 
+/**
+ * Per-track 3-band channel-strip EQ. Default fixed frequencies are
+ * the classic FL / Logic / Ableton channel-strip layout: low shelf at
+ * 80 Hz, mid peak at 1 kHz, high shelf at 8 kHz. Gain is in dB, range
+ * −24…+24 to match what a normal mixer provides; 0 dB on every band
+ * is fully transparent.
+ */
+export interface TrackEq {
+  low: number;   // dB
+  mid: number;   // dB
+  high: number;  // dB
+}
+
 export interface UndoSnapshot {
   trackId: string;
   buffer: AudioBuffer;
@@ -77,6 +98,7 @@ export interface ArrangementClipState {
   startOffset: number;
   volume: number;
   pan?: number;
+  eq?: TrackEq;
   muted: boolean;
   soloed: boolean;
   pitch: number;

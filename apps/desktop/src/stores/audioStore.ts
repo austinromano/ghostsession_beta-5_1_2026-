@@ -5,7 +5,7 @@ import { audioBufferCache, cacheBuffer, clearAudioCaches } from '../lib/audio';
 import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, type WarpedParams } from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
 import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOps';
-import type { LoadedTrack, UndoSnapshot, WarpMarker } from './audio/types';
+import type { LoadedTrack, UndoSnapshot, WarpMarker, TrackEq } from './audio/types';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
 /**
@@ -308,6 +308,7 @@ interface AudioState {
   stopSoloTrack: () => void;
   setTrackVolume: (trackId: string, volume: number) => void;
   setTrackPan: (trackId: string, pan: number) => void;
+  setTrackEq: (trackId: string, eq: TrackEq) => void;
   setTrackMuted: (trackId: string, muted: boolean) => void;
   removeTrack: (trackId: string) => void;
   loopTrackToFill: (trackId: string, fileId?: string) => void;
@@ -396,6 +397,36 @@ export const useAudioStore = create<AudioState>((set, get) => {
       && !!track.originalBuffer;
   }
 
+  // Build the per-track 3-band EQ chain — low shelf @ 80 Hz, mid peak @
+  // 1 kHz, high shelf @ 8 kHz. Always inserted; at 0 dB on every band
+  // BiquadFilter is transparent so leaving it on for un-EQ'd tracks
+  // costs nothing audible. Returns the IN and OUT nodes so callers can
+  // splice the chain into source → eqIn → ... → eqOut → gain.
+  function buildEqChain(
+    ctx: AudioContext,
+    eq: TrackEq | undefined,
+  ): { inNode: BiquadFilterNode; outNode: BiquadFilterNode; low: BiquadFilterNode; mid: BiquadFilterNode; high: BiquadFilterNode } {
+    const low = ctx.createBiquadFilter();
+    low.type = 'lowshelf';
+    low.frequency.value = 80;
+    low.gain.value = eq?.low ?? 0;
+
+    const mid = ctx.createBiquadFilter();
+    mid.type = 'peaking';
+    mid.frequency.value = 1000;
+    mid.Q.value = 0.7;
+    mid.gain.value = eq?.mid ?? 0;
+
+    const high = ctx.createBiquadFilter();
+    high.type = 'highshelf';
+    high.frequency.value = 8000;
+    high.gain.value = eq?.high ?? 0;
+
+    low.connect(mid);
+    mid.connect(high);
+    return { inNode: low, outNode: high, low, mid, high };
+  }
+
   function workletParamsFromTrack(track: LoadedTrack, projectBpm: number): WarpedParams {
     const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
     const warpActive = track.warp !== false && !!sourceBpm && sourceBpm > 0 && projectBpm > 0;
@@ -450,9 +481,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
           gain.gain.value = track.muted ? 0 : track.volume;
           const pan = ctx.createStereoPanner();
           pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
-          controller.node.connect(gain);
+          const eq = buildEqChain(ctx, track.eq);
+          controller.node.connect(eq.inNode);
+          eq.outNode.connect(gain);
           gain.connect(pan);
           pan.connect(getMaster());
+          track.eqLowNode = eq.low;
+          track.eqMidNode = eq.mid;
+          track.eqHighNode = eq.high;
           // Same parallel meter tap pattern as the BufferSource path —
           // tap before pan so the meter reads the lane's sound rather
           // than its stereo placement.
@@ -496,12 +532,17 @@ export const useAudioStore = create<AudioState>((set, get) => {
       gain.gain.value = track.muted ? 0 : track.volume;
       const pan = ctx.createStereoPanner();
       pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
-      // Audio path: source → gain → pan → mixer bus. StereoPannerNode
-      // is a built-in equal-power panner — same algorithm DAWs use for
-      // their channel-strip pan knobs.
-      source.connect(gain);
+      const eq = buildEqChain(ctx, track.eq);
+      // Audio path: source → eq (low → mid → high) → gain → pan → mixer
+      // bus. EQ at 0 dB across all bands is transparent so leaving it
+      // wired in for un-EQ'd tracks doesn't colour them.
+      source.connect(eq.inNode);
+      eq.outNode.connect(gain);
       gain.connect(pan);
       pan.connect(getMaster());
+      track.eqLowNode = eq.low;
+      track.eqMidNode = eq.mid;
+      track.eqHighNode = eq.high;
       // Meter tap — branches off the gain in PARALLEL so it does not sit
       // in the audio path. AnalyserNode is spec'd as transparent but
       // every node in series adds a render-quantum of latency and a
@@ -937,6 +978,44 @@ export const useAudioStore = create<AudioState>((set, get) => {
       set({ loadedTracks: new Map(loadedTracks) });
     },
 
+    setTrackEq: (trackId, eq) => {
+      const { loadedTracks } = get();
+      const track = loadedTracks.get(trackId);
+      if (!track) return;
+      const clamp = (v: number) => Math.max(-24, Math.min(24, v));
+      const next: TrackEq = {
+        low: clamp(eq.low ?? 0),
+        mid: clamp(eq.mid ?? 0),
+        high: clamp(eq.high ?? 0),
+      };
+      track.eq = next;
+      // Smooth the gain change on each band so a slider drag doesn't
+      // zipper. 30 ms ramp is below the perception threshold but kills
+      // the artifact.
+      try {
+        const ctx = getCtx();
+        const t = ctx.currentTime + 0.03;
+        if (track.eqLowNode) {
+          track.eqLowNode.gain.cancelScheduledValues(ctx.currentTime);
+          track.eqLowNode.gain.linearRampToValueAtTime(next.low, t);
+        }
+        if (track.eqMidNode) {
+          track.eqMidNode.gain.cancelScheduledValues(ctx.currentTime);
+          track.eqMidNode.gain.linearRampToValueAtTime(next.mid, t);
+        }
+        if (track.eqHighNode) {
+          track.eqHighNode.gain.cancelScheduledValues(ctx.currentTime);
+          track.eqHighNode.gain.linearRampToValueAtTime(next.high, t);
+        }
+      } catch {
+        if (track.eqLowNode) track.eqLowNode.gain.value = next.low;
+        if (track.eqMidNode) track.eqMidNode.gain.value = next.mid;
+        if (track.eqHighNode) track.eqHighNode.gain.value = next.high;
+      }
+      set({ loadedTracks: new Map(loadedTracks) });
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    },
+
     setTrackPan: (trackId, pan) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
@@ -1256,6 +1335,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           soloed: track.soloed,
           pitch: track.pitch,
           pan: track.pan,
+          eq: track.eq,
           bpm: track.bpm || undefined,
           warp: track.warp,
           warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
@@ -1306,6 +1386,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           if (existing.panNode) {
             try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
           }
+          existing.eq = (clip as any).eq;
+          if (existing.eqLowNode) try { existing.eqLowNode.gain.value = existing.eq?.low ?? 0; } catch { /* ignore */ }
+          if (existing.eqMidNode) try { existing.eqMidNode.gain.value = existing.eq?.mid ?? 0; } catch { /* ignore */ }
+          if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
           // Migrate old `number[]` format from the first warp-marker
           // commit into the new {sourceSec, bufferSec} object form.
           // bufferSec defaults to sourceSec * baseStretch so old markers
@@ -1378,6 +1462,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
           if (existing.panNode) {
             try { existing.panNode.pan.value = Math.max(-1, Math.min(1, existing.pan || 0)); } catch { /* ignore */ }
           }
+          existing.eq = (clip as any).eq;
+          if (existing.eqLowNode) try { existing.eqLowNode.gain.value = existing.eq?.low ?? 0; } catch { /* ignore */ }
+          if (existing.eqMidNode) try { existing.eqMidNode.gain.value = existing.eq?.mid ?? 0; } catch { /* ignore */ }
+          if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
         } else if (clip.parentTrackId && clip.parentFileId) {
           const parentTrack = m.get(clip.parentTrackId);
           if (parentTrack) {

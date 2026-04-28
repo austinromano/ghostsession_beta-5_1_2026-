@@ -21,6 +21,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackBpm = useAudioStore((s) => s.setTrackBpm);
   const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
+  const setTrackEq = useAudioStore((s) => s.setTrackEq);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // The panel operates on the WHOLE selection. Single click = one clip;
@@ -78,6 +79,9 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const volume = loaded?.volume ?? 1;
   const pitch = loaded?.pitch ?? 0;
   const pan = loaded?.pan ?? 0;
+  const eqLow = loaded?.eq?.low ?? 0;
+  const eqMid = loaded?.eq?.mid ?? 0;
+  const eqHigh = loaded?.eq?.high ?? 0;
   const muted = loaded?.muted ?? false;
   const warp = loaded?.warp !== false;
   // Manual BPM override (loaded.bpm). Falls back to the file's detected
@@ -99,6 +103,9 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const mixedVolume = !allSameNumber((t) => t?.volume);
   const mixedPitch = !allSameNumber((t) => t?.pitch);
   const mixedPan = !allSameNumber((t) => t?.pan ?? 0);
+  const mixedEqLow = !allSameNumber((t) => t?.eq?.low ?? 0);
+  const mixedEqMid = !allSameNumber((t) => t?.eq?.mid ?? 0);
+  const mixedEqHigh = !allSameNumber((t) => t?.eq?.high ?? 0);
   const mixedMuted = !allSameBool((t) => !!t?.muted);
   const mixedWarp = !allSameBool((t) => t?.warp !== false);
   const mixedBpm = !allSameNumber((t) => t?.bpm || 0);
@@ -107,6 +114,14 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const applyVolume = (v: number) => ids.forEach((id) => setTrackVolume(id, v));
   const applyPitch = (v: number) => ids.forEach((id) => setTrackPitch(id, v));
   const applyPan = (v: number) => ids.forEach((id) => setTrackPan(id, v));
+  const applyEqBand = (band: 'low' | 'mid' | 'high', v: number) => ids.forEach((id) => {
+    const t = loadedTracks.get(id);
+    setTrackEq(id, {
+      low: band === 'low' ? v : (t?.eq?.low ?? 0),
+      mid: band === 'mid' ? v : (t?.eq?.mid ?? 0),
+      high: band === 'high' ? v : (t?.eq?.high ?? 0),
+    });
+  });
   const applyMute = (next: boolean) => ids.forEach((id) => setTrackMuted(id, next));
   const applyWarp = (next: boolean) => ids.forEach((id) => setTrackWarp(id, next));
   const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
@@ -221,6 +236,42 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
           format={(v) => Math.abs(v) < 0.005 ? 'C' : (v > 0 ? `R${Math.round(v * 100)}` : `L${Math.round(-v * 100)}`)}
           onChange={applyPan}
         />
+        {/* 3-band EQ — channel-strip style. Bands are fixed at 80 Hz
+            low shelf, 1 kHz mid peak, 8 kHz high shelf. 0 dB on every
+            band is transparent. */}
+        <div className="border-t border-white/[0.06] pt-2 mt-1 flex flex-col gap-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-white/35 font-semibold">EQ</div>
+          <Slider
+            label="Lo"
+            value={eqLow}
+            mixed={mixedEqLow}
+            min={-24}
+            max={24}
+            step={0.5}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => applyEqBand('low', v)}
+          />
+          <Slider
+            label="Md"
+            value={eqMid}
+            mixed={mixedEqMid}
+            min={-24}
+            max={24}
+            step={0.5}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => applyEqBand('mid', v)}
+          />
+          <Slider
+            label="Hi"
+            value={eqHigh}
+            mixed={mixedEqHigh}
+            min={-24}
+            max={24}
+            step={0.5}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => applyEqBand('high', v)}
+          />
+        </div>
       </div>
     </div>
   );
