@@ -123,3 +123,78 @@ export function safeStop(source: AudioBufferSourceNode | null) {
   if (!source) return;
   try { source.stop(); } catch { /* already stopped */ }
 }
+
+// AudioWorklet registration. The processor file lives at
+// /warped-playback-worklet.js (copied from apps/desktop/public). We
+// load it lazily on first use because addModule is async and we
+// don't want to block app startup on it.
+let workletReady: Promise<void> | null = null;
+export function ensureWarpedPlaybackWorklet(): Promise<void> {
+  if (workletReady) return workletReady;
+  const ctx = getCtx();
+  workletReady = ctx.audioWorklet
+    .addModule('/warped-playback-worklet.js')
+    .catch((err) => {
+      // Reset so a future call retries — useful in dev when the file
+      // changes mid-session.
+      workletReady = null;
+      throw err;
+    });
+  return workletReady;
+}
+
+/**
+ * Construct a `warped-playback` AudioWorkletNode with the source buffer
+ * already pushed across the message port. Returns the node + a small
+ * controller wrapping its port so call sites don't have to know the
+ * message protocol. Caller is responsible for connecting the node into
+ * the graph (typically → trackGain → mixerBus) and for calling stop()
+ * + disconnect() at the end of playback.
+ */
+export interface WarpedPlaybackController {
+  node: AudioWorkletNode;
+  setParams: (p: WarpedParams) => void;
+  play: (startCtxTime: number, startProjectSec: number) => void;
+  stop: () => void;
+  dispose: () => void;
+}
+
+export interface WarpedParams {
+  markers: Array<{ sourceSec: number; bufferSec: number }>;
+  baseStretch: number;
+  pitchFactor: number;
+  trimStart: number;
+  trimEnd: number;
+  volume: number;
+}
+
+export function createWarpedPlaybackNode(buffer: AudioBuffer): WarpedPlaybackController {
+  const ctx = getCtx();
+  const node = new AudioWorkletNode(ctx, 'warped-playback', {
+    numberOfInputs: 0,
+    numberOfOutputs: 1,
+    outputChannelCount: [buffer.numberOfChannels],
+  });
+  // Snapshot every channel's data into a transferable array of
+  // Float32Arrays. Using `slice()` so we don't touch the source
+  // AudioBuffer's internal storage.
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < buffer.numberOfChannels; ch++) {
+    channels.push(buffer.getChannelData(ch).slice());
+  }
+  node.port.postMessage(
+    { type: 'init', channels, sampleRate: buffer.sampleRate },
+    channels.map((c) => c.buffer),
+  );
+  return {
+    node,
+    setParams: (p) => node.port.postMessage({ type: 'params', ...p }),
+    play: (startCtxTime, startProjectSec) =>
+      node.port.postMessage({ type: 'play', startCtxTime, startProjectSec }),
+    stop: () => node.port.postMessage({ type: 'stop' }),
+    dispose: () => {
+      try { node.port.postMessage({ type: 'stop' }); } catch { /* ignore */ }
+      try { node.disconnect(); } catch { /* ignore */ }
+    },
+  };
+}

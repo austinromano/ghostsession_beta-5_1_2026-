@@ -38,6 +38,19 @@ export interface LoadedTrack {
   // Empty array → no manual markers → fall back to a single global
   // stretch factor.
   warpMarkers?: WarpMarker[];
+  // When the track is playing through the AudioWorklet path (because
+  // it has warp markers), this holds the controller for the worklet
+  // node so we can post param updates without recreating the node.
+  // Null on the BufferSource path.
+  workletController?: WarpedPlaybackController | null;
+}
+
+export interface WarpedPlaybackController {
+  node: AudioWorkletNode;
+  setParams: (p: import('./graph').WarpedParams) => void;
+  play: (startCtxTime: number, startProjectSec: number) => void;
+  stop: () => void;
+  dispose: () => void;
 }
 
 export interface WarpMarker {

@@ -2,7 +2,7 @@
   "name": "ghost-session",
   "private": true,
   "scripts": {
-    "build": "pnpm --filter @ghost/types run build && pnpm --filter @ghost/protocol run build && pnpm --filter @ghost/tokens run build && pnpm --filter @ghost/desktop run build && rm -rf apps/server/public/assets && cp -r apps/desktop/dist/assets apps/server/public/assets && cp apps/desktop/dist/index.html apps/server/public/index.html && cp apps/desktop/dist/sw.js apps/server/public/sw.js",
+    "build": "pnpm --filter @ghost/types run build && pnpm --filter @ghost/protocol run build && pnpm --filter @ghost/tokens run build && pnpm --filter @ghost/desktop run build && rm -rf apps/server/public/assets && cp -r apps/desktop/dist/assets apps/server/public/assets && cp apps/desktop/dist/index.html apps/server/public/index.html && cp apps/desktop/dist/sw.js apps/server/public/sw.js && cp apps/desktop/dist/warped-playback-worklet.js apps/server/public/warped-playback-worklet.js",
     "start": "pnpm run build && cd apps/server && npx tsx src/index.ts"
   },
   "engines": {

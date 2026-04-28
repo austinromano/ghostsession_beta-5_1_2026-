@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { api } from '../lib/api';
 import { PITCH_MIN, PITCH_MAX } from '../lib/constants';
 import { audioBufferCache, cacheBuffer, clearAudioCaches } from '../lib/audio';
-import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop } from './audio/graph';
+import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, type WarpedParams } from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
 import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOps';
 import type { LoadedTrack, UndoSnapshot, WarpMarker } from './audio/types';
@@ -341,6 +341,15 @@ let soloGain: GainNode | null = null;
 let soloStartedAt = 0;
 let soloRafId: number | null = null;
 
+// Kick off WarpedPlayback worklet registration as soon as the audio
+// store loads. addModule is async; firing it from module init lets
+// the fetch + parse complete in the background while the user is
+// browsing projects so the worklet is ready by the time they hit play.
+// If it fails, the worklet path bails per-track to BufferSource.
+ensureWarpedPlaybackWorklet().catch((err) => {
+  if (typeof console !== 'undefined') console.warn('[audioStore] WarpedPlayback worklet not registered:', err);
+});
+
 export const useAudioStore = create<AudioState>((set, get) => {
 
   function recalcDuration() {
@@ -369,17 +378,103 @@ export const useAudioStore = create<AudioState>((set, get) => {
     rafId = requestAnimationFrame(updatePosition);
   }
 
+  // Worklet eligibility — every condition listed:
+  //   1. Track has at least one user-placed warp marker
+  //   2. Pitch is 0 (worklet's linear stretch couples pitch + speed; the
+  //      existing pre-stretch path keeps pitch time-preserving, so we
+  //      only switch to worklet when pitch wouldn't change anything)
+  //   3. Warp is on (worklet's marker math assumes the stretch model)
+  //   4. originalBuffer is loaded (worklet plays from the unstretched
+  //      source, not the pre-stretched buffer)
+  // Everything else falls back to the BufferSource path unchanged.
+  function shouldUseWorkletForTrack(track: LoadedTrack): boolean {
+    return !!track.warpMarkers
+      && track.warpMarkers.length > 0
+      && (track.pitch || 0) === 0
+      && track.warp !== false
+      && !!track.originalBuffer;
+  }
+
+  function workletParamsFromTrack(track: LoadedTrack, projectBpm: number): WarpedParams {
+    const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
+    const warpActive = track.warp !== false && !!sourceBpm && sourceBpm > 0 && projectBpm > 0;
+    const warpFactor = warpActive ? (sourceBpm! / projectBpm) : 1;
+    const pitchFactor = Math.pow(2, (track.pitch || 0) / 12);
+    return {
+      markers: track.warpMarkers || [],
+      // Worklet's outputToSource uses baseStretch as the warp-only
+      // factor — pitch is layered on as a separate ctx-time multiplier.
+      baseStretch: warpFactor,
+      pitchFactor,
+      // trim values come from the audio store in pre-stretched-buffer
+      // seconds; worklet output time matches that timeline 1:1 when
+      // pitch is 0 (the only case we use the worklet for right now).
+      trimStart: track.trimStart,
+      trimEnd: track.trimEnd,
+      // Volume is owned by the downstream gainNode (same node both
+      // paths feed into). Worklet's internal volume is a passthrough
+      // unity multiplier so setTrackVolume / setTrackMuted keep working
+      // without re-posting params to the worklet.
+      volume: 1,
+    };
+  }
+
+  function disposeWorkletController(track: LoadedTrack) {
+    if (track.workletController) {
+      try { track.workletController.dispose(); } catch { /* ignore */ }
+      track.workletController = null;
+    }
+  }
+
   function startAllSources(offset: number) {
     const ctx = getCtx();
-    const { loadedTracks } = get();
+    const { loadedTracks, projectBpm } = get();
 
     if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
 
     loadedTracks.forEach((track) => {
       safeStop(track.source);
+      disposeWorkletController(track);
       // Disconnect any prior analyser so the OLD node doesn't keep showing
       // a frozen reading after we restart playback.
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } }
+
+      // Worklet path — tracks with warp markers play through the
+      // streaming worklet so marker drags update audio in real time
+      // without a buffer rebuild.
+      if (shouldUseWorkletForTrack(track)) {
+        try {
+          const controller = createWarpedPlaybackNode(track.originalBuffer!);
+          const gain = ctx.createGain();
+          gain.gain.value = track.muted ? 0 : track.volume;
+          controller.node.connect(gain);
+          gain.connect(getMaster());
+          // Same parallel meter tap pattern as the BufferSource path.
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.6;
+          gain.connect(analyser);
+          track.analyser = analyser;
+          track.workletController = controller;
+          track.gainNode = gain;
+          controller.setParams(workletParamsFromTrack(track, projectBpm));
+          // Same start-time math as the BufferSource branch — `offset`
+          // is the project-time at which playback resumes; clips that
+          // start later schedule via startCtxTime.
+          const projectTime = offset;
+          const trackStartsAt = track.startOffset;
+          if (projectTime >= trackStartsAt) {
+            controller.play(ctx.currentTime, projectTime - trackStartsAt);
+          } else {
+            controller.play(ctx.currentTime + (trackStartsAt - projectTime), 0);
+          }
+          return; // worklet path taken — skip the BufferSource branch
+        } catch (err) {
+          // Worklet failed to construct (probably not registered yet);
+          // fall through to BufferSource on this track's playback.
+          if (typeof console !== 'undefined') console.warn('[audioStore] worklet path failed, falling back', err);
+        }
+      }
 
       const source = ctx.createBufferSource();
       source.buffer = track.buffer;
@@ -440,6 +535,9 @@ export const useAudioStore = create<AudioState>((set, get) => {
         track.source = null;
         track.gainNode = null;
       }
+      // Tear down the worklet too — same lifecycle as the BufferSource
+      // path: worklet is recreated per-play, not persistent.
+      disposeWorkletController(track);
       if (track.analyser) { try { track.analyser.disconnect(); } catch { /* ignore */ } track.analyser = null; }
     });
   }
@@ -1018,17 +1116,26 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const { loadedTracks, projectBpm } = get();
       const track = loadedTracks.get(trackId);
       if (!track) return;
-      // Sort by source position + drop invalid entries so segment math
-      // downstream is stable.
       const sorted = markers
         .filter((m) => m && Number.isFinite(m.sourceSec) && Number.isFinite(m.bufferSec) && m.sourceSec >= 0 && m.bufferSec >= 0)
         .sort((a, b) => a.sourceSec - b.sourceSec);
       track.warpMarkers = sorted;
-      // Rebuild the play buffer through composePlayBuffer — when markers
-      // are present this triggers the piecewise stretch path. If the
-      // buffer length changes, scale the trim points to keep them
-      // pinned to the same musical positions (same dance as
-      // setTrackPitch).
+      // Worklet path — controller is live; just push the new params and
+      // the next 128-sample block picks them up. No buffer rebuild, no
+      // playback restart, no main-thread WSOLA. Buffer/trim stay where
+      // they are so the visual waveform doesn't churn either (visual
+      // updates from the buffer rebuild that happens lazily on next
+      // play / pitch / warp change).
+      if (track.workletController) {
+        track.workletController.setParams(workletParamsFromTrack(track, projectBpm));
+        set({ loadedTracks: new Map(loadedTracks), bufferVersion: get().bufferVersion + 1 });
+        window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+        return;
+      }
+      // BufferSource path — rebuild the play buffer through
+      // composePlayBuffer (piecewise stretch when markers are present).
+      // Scale trim by the buffer-length change so markers stay pinned
+      // to the same musical positions.
       if (track.originalBuffer) {
         if (track.source) safeStop(track.source);
         if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
