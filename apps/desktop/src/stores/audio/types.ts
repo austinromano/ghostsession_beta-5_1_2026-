@@ -21,6 +21,12 @@ export interface LoadedTrack {
   eqLowNode?: BiquadFilterNode | null;
   eqMidNode?: BiquadFilterNode | null;
   eqHighNode?: BiquadFilterNode | null;
+  // Per-track compressor. Worklet-based, sits after EQ and before the
+  // gain stage. Optional in the type so existing call sites keep
+  // compiling — undefined means "no compression configured" (the
+  // worklet still inserts but defaults to ratio=1, which is bypass).
+  comp?: TrackComp;
+  compNode?: AudioWorkletNode | null;
   muted: boolean;
   soloed: boolean;
   bpm: number;
@@ -85,6 +91,19 @@ export interface TrackEq {
   high: number;  // dB
 }
 
+/**
+ * Per-track compressor params. ratio = 1 is bypass (the worklet
+ * fast-paths through, bit-perfect). threshold is in dBFS, attack /
+ * release in seconds, makeup in dB applied post-compression.
+ */
+export interface TrackComp {
+  threshold: number;  // dB,  -60..0
+  ratio: number;      // 1..20  (1 = bypass)
+  attack: number;     // sec, 0.0001..1
+  release: number;    // sec, 0.001..1
+  makeup: number;     // dB,  -20..+20
+}
+
 export interface UndoSnapshot {
   trackId: string;
   buffer: AudioBuffer;
@@ -99,6 +118,7 @@ export interface ArrangementClipState {
   volume: number;
   pan?: number;
   eq?: TrackEq;
+  comp?: TrackComp;
   muted: boolean;
   soloed: boolean;
   pitch: number;

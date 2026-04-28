@@ -2,10 +2,10 @@ import { create } from 'zustand';
 import { api } from '../lib/api';
 import { PITCH_MIN, PITCH_MAX } from '../lib/constants';
 import { audioBufferCache, cacheBuffer, clearAudioCaches } from '../lib/audio';
-import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, type WarpedParams } from './audio/graph';
+import { getCtx, getMaster, getMasterFader, getAnalyser as getAnalyserNode, safeStop, ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet, createTrackCompressorNode, type WarpedParams } from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
 import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOps';
-import type { LoadedTrack, UndoSnapshot, WarpMarker, TrackEq } from './audio/types';
+import type { LoadedTrack, UndoSnapshot, WarpMarker, TrackEq, TrackComp } from './audio/types';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
 /**
@@ -309,6 +309,7 @@ interface AudioState {
   setTrackVolume: (trackId: string, volume: number) => void;
   setTrackPan: (trackId: string, pan: number) => void;
   setTrackEq: (trackId: string, eq: TrackEq) => void;
+  setTrackComp: (trackId: string, comp: TrackComp) => void;
   setTrackMuted: (trackId: string, muted: boolean) => void;
   removeTrack: (trackId: string) => void;
   loopTrackToFill: (trackId: string, fileId?: string) => void;
@@ -350,6 +351,9 @@ let soloRafId: number | null = null;
 // If it fails, the worklet path bails per-track to BufferSource.
 ensureWarpedPlaybackWorklet().catch((err) => {
   if (typeof console !== 'undefined') console.warn('[audioStore] WarpedPlayback worklet not registered:', err);
+});
+ensureTrackCompressorWorklet().catch((err) => {
+  if (typeof console !== 'undefined') console.warn('[audioStore] TrackCompressor worklet not registered:', err);
 });
 
 export const useAudioStore = create<AudioState>((set, get) => {
@@ -427,6 +431,28 @@ export const useAudioStore = create<AudioState>((set, get) => {
     return { inNode: low, outNode: high, low, mid, high };
   }
 
+  // Apply a TrackComp to a live track-compressor worklet's k-rate
+  // params. Smooth via linearRampToValueAtTime so a slider drag
+  // doesn't zipper the audio.
+  function applyCompToNode(node: AudioWorkletNode, comp: TrackComp | undefined) {
+    const ctx = getCtx();
+    const t = ctx.currentTime + 0.03;
+    const c: TrackComp = comp ?? { threshold: 0, ratio: 1, attack: 0.003, release: 0.1, makeup: 0 };
+    const setParam = (name: string, v: number) => {
+      const p = (node.parameters as unknown as Map<string, AudioParam>).get(name);
+      if (!p) return;
+      try {
+        p.cancelScheduledValues(ctx.currentTime);
+        p.linearRampToValueAtTime(v, t);
+      } catch { p.value = v; }
+    };
+    setParam('threshold', c.threshold);
+    setParam('ratio', c.ratio);
+    setParam('attack', c.attack);
+    setParam('release', c.release);
+    setParam('makeup', c.makeup);
+  }
+
   function workletParamsFromTrack(track: LoadedTrack, projectBpm: number): WarpedParams {
     const sourceBpm = (track.bpm && track.bpm > 0) ? track.bpm : track.detectedBpm;
     const warpActive = track.warp !== false && !!sourceBpm && sourceBpm > 0 && projectBpm > 0;
@@ -482,13 +508,24 @@ export const useAudioStore = create<AudioState>((set, get) => {
           const pan = ctx.createStereoPanner();
           pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
           const eq = buildEqChain(ctx, track.eq);
+          const comp = createTrackCompressorNode();
+          if (comp) applyCompToNode(comp, track.comp);
           controller.node.connect(eq.inNode);
-          eq.outNode.connect(gain);
+          // Compressor sits between EQ and gain. Falls back to direct
+          // EQ→gain if the worklet hasn't registered yet (silent on
+          // the first ~50 ms of app load).
+          if (comp) {
+            eq.outNode.connect(comp);
+            comp.connect(gain);
+          } else {
+            eq.outNode.connect(gain);
+          }
           gain.connect(pan);
           pan.connect(getMaster());
           track.eqLowNode = eq.low;
           track.eqMidNode = eq.mid;
           track.eqHighNode = eq.high;
+          track.compNode = comp;
           // Same parallel meter tap pattern as the BufferSource path —
           // tap before pan so the meter reads the lane's sound rather
           // than its stereo placement.
@@ -533,16 +570,24 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const pan = ctx.createStereoPanner();
       pan.pan.value = Math.max(-1, Math.min(1, track.pan || 0));
       const eq = buildEqChain(ctx, track.eq);
-      // Audio path: source → eq (low → mid → high) → gain → pan → mixer
-      // bus. EQ at 0 dB across all bands is transparent so leaving it
-      // wired in for un-EQ'd tracks doesn't colour them.
+      const comp = createTrackCompressorNode();
+      if (comp) applyCompToNode(comp, track.comp);
+      // Audio path: source → eq → compressor → gain → pan → mixer bus.
+      // The compressor is a worklet that fast-paths through (bit-perfect)
+      // when ratio = 1, so it's free to leave inserted on every track.
       source.connect(eq.inNode);
-      eq.outNode.connect(gain);
+      if (comp) {
+        eq.outNode.connect(comp);
+        comp.connect(gain);
+      } else {
+        eq.outNode.connect(gain);
+      }
       gain.connect(pan);
       pan.connect(getMaster());
       track.eqLowNode = eq.low;
       track.eqMidNode = eq.mid;
       track.eqHighNode = eq.high;
+      track.compNode = comp;
       // Meter tap — branches off the gain in PARALLEL so it does not sit
       // in the audio path. AnalyserNode is spec'd as transparent but
       // every node in series adds a render-quantum of latency and a
@@ -978,6 +1023,23 @@ export const useAudioStore = create<AudioState>((set, get) => {
       set({ loadedTracks: new Map(loadedTracks) });
     },
 
+    setTrackComp: (trackId, comp) => {
+      const { loadedTracks } = get();
+      const track = loadedTracks.get(trackId);
+      if (!track) return;
+      const next: TrackComp = {
+        threshold: Math.max(-60, Math.min(0, comp.threshold)),
+        ratio: Math.max(1, Math.min(20, comp.ratio)),
+        attack: Math.max(0.0001, Math.min(1, comp.attack)),
+        release: Math.max(0.001, Math.min(1, comp.release)),
+        makeup: Math.max(-20, Math.min(20, comp.makeup)),
+      };
+      track.comp = next;
+      if (track.compNode) applyCompToNode(track.compNode, next);
+      set({ loadedTracks: new Map(loadedTracks) });
+      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+    },
+
     setTrackEq: (trackId, eq) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
@@ -1336,6 +1398,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
           pitch: track.pitch,
           pan: track.pan,
           eq: track.eq,
+          comp: track.comp,
           bpm: track.bpm || undefined,
           warp: track.warp,
           warpMarkers: track.warpMarkers && track.warpMarkers.length ? track.warpMarkers : undefined,
@@ -1390,6 +1453,8 @@ export const useAudioStore = create<AudioState>((set, get) => {
           if (existing.eqLowNode) try { existing.eqLowNode.gain.value = existing.eq?.low ?? 0; } catch { /* ignore */ }
           if (existing.eqMidNode) try { existing.eqMidNode.gain.value = existing.eq?.mid ?? 0; } catch { /* ignore */ }
           if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
+          existing.comp = (clip as any).comp;
+          if (existing.compNode) applyCompToNode(existing.compNode, existing.comp);
           // Migrate old `number[]` format from the first warp-marker
           // commit into the new {sourceSec, bufferSec} object form.
           // bufferSec defaults to sourceSec * baseStretch so old markers
@@ -1466,6 +1531,8 @@ export const useAudioStore = create<AudioState>((set, get) => {
           if (existing.eqLowNode) try { existing.eqLowNode.gain.value = existing.eq?.low ?? 0; } catch { /* ignore */ }
           if (existing.eqMidNode) try { existing.eqMidNode.gain.value = existing.eq?.mid ?? 0; } catch { /* ignore */ }
           if (existing.eqHighNode) try { existing.eqHighNode.gain.value = existing.eq?.high ?? 0; } catch { /* ignore */ }
+          existing.comp = (clip as any).comp;
+          if (existing.compNode) applyCompToNode(existing.compNode, existing.comp);
         } else if (clip.parentTrackId && clip.parentFileId) {
           const parentTrack = m.get(clip.parentTrackId);
           if (parentTrack) {

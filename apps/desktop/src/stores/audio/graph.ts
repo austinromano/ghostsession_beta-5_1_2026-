@@ -179,6 +179,36 @@ export function ensureMasterLimiterWorklet(): Promise<void> {
   return masterLimiterReady;
 }
 
+let trackCompressorReady: Promise<void> | null = null;
+export function ensureTrackCompressorWorklet(): Promise<void> {
+  if (trackCompressorReady) return trackCompressorReady;
+  const ctx = getCtx();
+  trackCompressorReady = ctx.audioWorklet
+    .addModule('/track-compressor-worklet.js')
+    .catch((err) => { trackCompressorReady = null; throw err; });
+  return trackCompressorReady;
+}
+
+/**
+ * Try to construct a track-compressor AudioWorkletNode. Returns null if
+ * the worklet hasn't loaded yet — callers should fall back to a plain
+ * passthrough connection so the chain still produces audio while the
+ * worklet finishes registering. Subsequent calls succeed once the
+ * registration promise resolves.
+ */
+export function createTrackCompressorNode(): AudioWorkletNode | null {
+  const ctx = getCtx();
+  try {
+    return new AudioWorkletNode(ctx, 'track-compressor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [2],
+    });
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Construct a `warped-playback` AudioWorkletNode with the source buffer
  * already pushed across the message port. Returns the node + a small

@@ -22,6 +22,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
   const setTrackEq = useAudioStore((s) => s.setTrackEq);
+  const setTrackComp = useAudioStore((s) => s.setTrackComp);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // The panel operates on the WHOLE selection. Single click = one clip;
@@ -82,6 +83,9 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const eqLow = loaded?.eq?.low ?? 0;
   const eqMid = loaded?.eq?.mid ?? 0;
   const eqHigh = loaded?.eq?.high ?? 0;
+  const compThreshold = loaded?.comp?.threshold ?? 0;
+  const compRatio = loaded?.comp?.ratio ?? 1;
+  const compMakeup = loaded?.comp?.makeup ?? 0;
   const muted = loaded?.muted ?? false;
   const warp = loaded?.warp !== false;
   // Manual BPM override (loaded.bpm). Falls back to the file's detected
@@ -106,6 +110,9 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const mixedEqLow = !allSameNumber((t) => t?.eq?.low ?? 0);
   const mixedEqMid = !allSameNumber((t) => t?.eq?.mid ?? 0);
   const mixedEqHigh = !allSameNumber((t) => t?.eq?.high ?? 0);
+  const mixedCompThreshold = !allSameNumber((t) => t?.comp?.threshold ?? 0);
+  const mixedCompRatio = !allSameNumber((t) => t?.comp?.ratio ?? 1);
+  const mixedCompMakeup = !allSameNumber((t) => t?.comp?.makeup ?? 0);
   const mixedMuted = !allSameBool((t) => !!t?.muted);
   const mixedWarp = !allSameBool((t) => t?.warp !== false);
   const mixedBpm = !allSameNumber((t) => t?.bpm || 0);
@@ -120,6 +127,17 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
       low: band === 'low' ? v : (t?.eq?.low ?? 0),
       mid: band === 'mid' ? v : (t?.eq?.mid ?? 0),
       high: band === 'high' ? v : (t?.eq?.high ?? 0),
+    });
+  });
+  const applyCompField = (field: 'threshold' | 'ratio' | 'makeup', v: number) => ids.forEach((id) => {
+    const t = loadedTracks.get(id);
+    const cur = t?.comp ?? { threshold: 0, ratio: 1, attack: 0.003, release: 0.1, makeup: 0 };
+    setTrackComp(id, {
+      threshold: field === 'threshold' ? v : cur.threshold,
+      ratio: field === 'ratio' ? v : cur.ratio,
+      attack: cur.attack,
+      release: cur.release,
+      makeup: field === 'makeup' ? v : cur.makeup,
     });
   });
   const applyMute = (next: boolean) => ids.forEach((id) => setTrackMuted(id, next));
@@ -270,6 +288,44 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
             step={0.5}
             format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
             onChange={(v) => applyEqBand('high', v)}
+          />
+        </div>
+        {/* Compressor — feed-forward, hard knee. ratio = 1 is bypass
+            (worklet fast-paths through bit-perfect). Threshold + ratio
+            are the two knobs that matter; attack/release stay at
+            channel-strip defaults (3 ms / 100 ms). Makeup applies
+            post-compression to claw back perceived loudness. */}
+        <div className="border-t border-white/[0.06] pt-2 mt-1 flex flex-col gap-1.5">
+          <div className="text-[9px] uppercase tracking-wider text-white/35 font-semibold">Comp</div>
+          <Slider
+            label="Th"
+            value={compThreshold}
+            mixed={mixedCompThreshold}
+            min={-60}
+            max={0}
+            step={0.5}
+            format={(v) => `${v.toFixed(1)} dB`}
+            onChange={(v) => applyCompField('threshold', v)}
+          />
+          <Slider
+            label="Rt"
+            value={compRatio}
+            mixed={mixedCompRatio}
+            min={1}
+            max={20}
+            step={0.1}
+            format={(v) => `${v.toFixed(1)}:1`}
+            onChange={(v) => applyCompField('ratio', v)}
+          />
+          <Slider
+            label="Mk"
+            value={compMakeup}
+            mixed={mixedCompMakeup}
+            min={-20}
+            max={20}
+            step={0.5}
+            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
+            onChange={(v) => applyCompField('makeup', v)}
           />
         </div>
       </div>
