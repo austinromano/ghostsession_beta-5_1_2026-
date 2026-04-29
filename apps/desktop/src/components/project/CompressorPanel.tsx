@@ -1,10 +1,11 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   defaultParams,
   useEffectsStore,
   type CompParams,
   type Effect,
 } from '../../stores/effectsStore';
+import { getLaneCompAnalyser } from '../../stores/audio/trackComp';
 
 // Compressor panel — visual-first. Mirrors the user-supplied design:
 //
@@ -266,10 +267,10 @@ export default function CompressorPanel({
 
       {/* Body: meter + curve + readouts */}
       <div className="flex gap-2 px-3 pt-2">
-        {/* Meter column */}
+        {/* Meter column — live input level from the comp's analyser tap. */}
         <div className="flex flex-col items-center gap-1 shrink-0" style={{ width: 28 }}>
-          <span className="text-[9px] font-semibold text-white/55 uppercase tracking-wider">High</span>
-          <Meter />
+          <span className="text-[9px] font-semibold text-white/55 uppercase tracking-wider">In</span>
+          <LiveMeter laneKey={laneKey} />
         </div>
 
         {/* Transfer-curve graph */}
@@ -391,32 +392,69 @@ function ReadoutRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Static gradient meter — visual placeholder. Live amplitude tap will
-// land when DSP routing for the compressor is wired.
-function Meter() {
+// Live input meter — reads time-domain samples from the comp's
+// analyser tap each animation frame and lights up the corresponding
+// number of segments (green low, yellow mid, red top). Falls back to
+// a fully-dark column when no analyser is registered (track hasn't
+// been played yet).
+function LiveMeter({ laneKey }: { laneKey: string }) {
   const SEGMENTS = 14;
+  const segRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const peakRef = useRef<number>(0);
+
+  useEffect(() => {
+    let raf = 0;
+    let buf: Float32Array | null = null;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const a = getLaneCompAnalyser(laneKey);
+      let level = 0;
+      if (a) {
+        const bins = a.fftSize;
+        if (!buf || buf.length !== bins) buf = new Float32Array(bins);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        a.getFloatTimeDomainData(buf as any);
+        // RMS across the captured block — perceptually closer to a
+        // VU meter than peak. Cheap enough at 1024 samples per frame.
+        let sum = 0;
+        for (let i = 0; i < bins; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / bins);
+        level = rms;
+      }
+      // Peak-decay envelope so the meter doesn't strobe on transients.
+      const decay = 0.92;
+      peakRef.current = Math.max(level, peakRef.current * decay);
+      // Map level (0..1, with practical headroom) to lit segments.
+      // 0 dBFS = 1.0, -60 dBFS = 0.001.
+      const dB = peakRef.current > 1e-5 ? 20 * Math.log10(peakRef.current) : -60;
+      const t = clamp((dB + 60) / 60, 0, 1); // -60..0 dB -> 0..1
+      const lit = Math.round(t * SEGMENTS);
+      for (let i = 0; i < SEGMENTS; i++) {
+        const el = segRefs.current[i];
+        if (!el) continue;
+        const isLit = i < lit;
+        // Bottom (i=0) green, middle yellow, top (i=SEGMENTS-1) red.
+        const hue = 120 - (i / (SEGMENTS - 1)) * 120;
+        el.style.background = isLit ? `hsl(${hue}, 85%, 55%)` : 'rgba(255,255,255,0.04)';
+        el.style.boxShadow = isLit ? `0 0 4px hsl(${hue}, 85%, 55%)` : 'none';
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [laneKey]);
+
   return (
     <div
       className="rounded-sm overflow-hidden flex flex-col-reverse items-stretch gap-[1px] py-[1px] px-[1px]"
       style={{ width: 12, height: 110, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
     >
-      {Array.from({ length: SEGMENTS }, (_, i) => {
-        const t = i / (SEGMENTS - 1);
-        // Green at the bottom, yellow in the middle, red near the top.
-        const hue = 120 - t * 120;
-        const lit = i < Math.round(SEGMENTS * 0.55);
-        return (
-          <div
-            key={i}
-            style={{
-              flex: 1,
-              background: lit ? `hsl(${hue}, 80%, 50%)` : 'rgba(255,255,255,0.04)',
-              opacity: lit ? 0.85 : 1,
-              borderRadius: 1,
-            }}
-          />
-        );
-      })}
+      {Array.from({ length: SEGMENTS }, (_, i) => (
+        <div
+          key={i}
+          ref={(el) => { segRefs.current[i] = el; }}
+          style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 1, transition: 'box-shadow 80ms linear' }}
+        />
+      ))}
     </div>
   );
 }

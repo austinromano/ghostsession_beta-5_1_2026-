@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { setLaneEqBand, setLaneEqBypass } from './audio/trackEq';
+import { setLaneCompParam, setLaneCompBypass } from './audio/trackComp';
 import { getCtx } from './audio/graph';
 
 // Resolve the live AudioContext for filter ramps. Wrapped in a
@@ -255,8 +256,13 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     persistProject(pid, proj);
     // Push bypass to live filter params for every clip in the lane —
     // smooth-ramps, no playback interruption.
-    if (toggled && (toggled as Effect).kind === 'eq') {
-      setLaneEqBypass(trackId, (toggled as Effect).bypassed, getCtxIfPresent());
+    if (toggled) {
+      const t = toggled as Effect;
+      if (t.kind === 'eq') {
+        setLaneEqBypass(trackId, t.bypassed, getCtxIfPresent());
+      } else if (t.kind === 'comp') {
+        setLaneCompBypass(trackId, t.bypassed, getCtxIfPresent());
+      }
     }
   },
 
@@ -323,8 +329,9 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     next.set(pid, proj);
     set({ byProject: next });
     persistProject(pid, proj);
-    // DSP routing for comp lands in a follow-up; visual params persist
-    // here so the curve / knob state survives reloads.
+    // Live-push to every clip's worklet in the lane. trackId here IS
+    // the laneKey (drops are stored by laneKey).
+    setLaneCompParam(trackId, field, value, getCtxIfPresent());
   },
 
   setEqBand: (trackId, effectId, bandIndex, patch) => {

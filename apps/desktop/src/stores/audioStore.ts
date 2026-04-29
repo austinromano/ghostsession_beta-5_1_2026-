@@ -14,7 +14,8 @@ import { save as saveArrangement, load as loadArrangement } from './audio/arrang
 import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOps';
 import type { LoadedTrack, UndoSnapshot, WarpMarker, BusFxState } from './audio/types';
 import { buildTrackEqChain, removeTrackEq, disposeAllTrackEq } from './audio/trackEq';
-import { useEffectsStore, type EqParams } from './effectsStore';
+import { buildTrackCompChain, removeTrackComp, disposeAllTrackComp } from './audio/trackComp';
+import { useEffectsStore, type EqParams, type CompParams } from './effectsStore';
 import { useProjectStore } from './projectStore';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
@@ -455,18 +456,38 @@ export const useAudioStore = create<AudioState>((set, get) => {
     const ctx = getCtx();
     const { loadedTracks, projectBpm } = get();
 
-    // Resolve a track's EQ effect (if any). The chain is keyed by lane
-    // (fileId for normal tracks, trackId fallback). Returns the active
-    // EQ effect plus the laneKey it lives under so we can register the
-    // filters in the trackEq module.
+    // Walk a clip's lane chain in order and splice DSP nodes between
+    // `inputNode` and the master mixer. Returns the final output node
+    // so the caller can attach the bus-send tap to POST-FX signal.
+    // The chain is keyed by lane (fileId for normal tracks, trackId
+    // fallback) — every clip in a lane gets the same effects.
     const projTracks = (useProjectStore.getState().currentProject?.tracks ?? []) as Array<{ id: string; fileId?: string | null }>;
-    const resolveLaneEq = (trackId: string): { laneKey: string; bands: EqParams['bands']; bypassed: boolean } | null => {
+    const buildLaneChainFor = (trackId: string, inputNode: AudioNode): AudioNode => {
       const projTrack = projTracks.find((p) => p.id === trackId);
       const laneKey = (projTrack?.fileId && projTrack.fileId.length > 0) ? projTrack.fileId : trackId;
+      // Wipe any previous DSP for this trackId so we don't leak nodes
+      // when the chain shape changes between starts.
+      removeTrackEq(trackId);
+      removeTrackComp(trackId);
       const chain = useEffectsStore.getState().getChain(laneKey);
-      const eq = chain.find((e) => e.kind === 'eq');
-      if (!eq || !eq.params || !('bands' in eq.params)) return null;
-      return { laneKey, bands: (eq.params as EqParams).bands, bypassed: eq.bypassed };
+      let cursor: AudioNode = inputNode;
+      for (const fx of chain) {
+        try {
+          if (fx.kind === 'eq' && fx.params && 'bands' in fx.params) {
+            const eq = buildTrackEqChain(ctx, trackId, laneKey, (fx.params as EqParams).bands as any, fx.bypassed);
+            cursor.connect(eq.input);
+            cursor = eq.output;
+          } else if (fx.kind === 'comp' && fx.params && 'threshold' in fx.params) {
+            const comp = buildTrackCompChain(ctx, trackId, laneKey, fx.params as CompParams, fx.bypassed);
+            cursor.connect(comp.input);
+            cursor = comp.output;
+          }
+          // reverb skipped — no DSP wiring yet, visual placeholder only.
+        } catch (err) {
+          if (typeof console !== 'undefined') console.warn('[audioStore] FX build failed for', fx.kind, err);
+        }
+      }
+      return cursor;
     };
 
     if (loopTimer) { clearTimeout(loopTimer); loopTimer = null; }
@@ -497,23 +518,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
           // processed by the bus's EQ → Comp → Reverb chain.
           controller.node.connect(gain);
           gain.connect(pan);
-          // Per-track EQ: if the lane has an EQ effect, splice a 4-band
-          // peaking BiquadFilter chain between pan and master. The send
-          // tap also pulls from POST-EQ so the FX bus receives the
-          // EQ'd signal (consistent with master path).
-          const laneEq = resolveLaneEq(track.id);
-          let postPan: AudioNode = pan;
-          if (laneEq) {
-            const eqChain = buildTrackEqChain(ctx, track.id, laneEq.laneKey, laneEq.bands as any, laneEq.bypassed);
-            pan.connect(eqChain.input);
-            postPan = eqChain.output;
-          } else {
-            removeTrackEq(track.id);
-          }
-          postPan.connect(getMaster());
+          // Walk the lane's effect chain (EQ, Comp, ...) and splice
+          // each layer's DSP between pan and master. The send tap
+          // pulls POST-FX so the bus receives the processed signal.
+          const postFx = buildLaneChainFor(track.id, pan);
+          postFx.connect(getMaster());
           const send = ctx.createGain();
           send.gain.value = Math.max(0, Math.min(1, track.busSend ?? 0));
-          postPan.connect(send);
+          postFx.connect(send);
           send.connect(getFxBusInput());
           track.busSendNode = send;
           // Parallel meter tap — branches off gain so the meter reads
@@ -563,19 +575,11 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // is dry by default, user opts in by raising the send knob.
       source.connect(gain);
       gain.connect(pan);
-      const laneEq = resolveLaneEq(track.id);
-      let postPan: AudioNode = pan;
-      if (laneEq) {
-        const eqChain = buildTrackEqChain(ctx, track.id, laneEq.laneKey, laneEq.bands as any, laneEq.bypassed);
-        pan.connect(eqChain.input);
-        postPan = eqChain.output;
-      } else {
-        removeTrackEq(track.id);
-      }
-      postPan.connect(getMaster());
+      const postFx = buildLaneChainFor(track.id, pan);
+      postFx.connect(getMaster());
       const send = ctx.createGain();
       send.gain.value = Math.max(0, Math.min(1, track.busSend ?? 0));
-      postPan.connect(send);
+      postFx.connect(send);
       send.connect(getFxBusInput());
       track.busSendNode = send;
       // Meter tap — branches off the gain in PARALLEL so it does not sit
@@ -1566,9 +1570,10 @@ export const useAudioStore = create<AudioState>((set, get) => {
       undoStack.length = 0;
       redoStack.length = 0;
       clearAudioCaches();
-      // Drop every per-track EQ chain so the next project doesn't
-      // inherit orphan biquad nodes.
+      // Drop every per-track EQ + Comp chain so the next project
+      // doesn't inherit orphan filter / worklet nodes.
       disposeAllTrackEq();
+      disposeAllTrackComp();
       set({
         isPlaying: false, currentTime: 0, loadedTracks: new Map(), duration: 0,
         projectBpm: 0, soloPlayingTrackId: null, soloCurrentTime: 0, soloDuration: 0,
