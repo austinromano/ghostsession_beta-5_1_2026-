@@ -128,6 +128,88 @@ export default function CompressorPanel({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<'threshold' | 'ratio' | null>(null);
 
+  // Refs for the live "compression dot" — glowing point that rides
+  // along the transfer curve at (currentInputDb, currentOutputDb).
+  // Drawn via setAttribute in a rAF loop so React doesn't re-render
+  // the panel 60 times per second.
+  const compDotRef = useRef<SVGCircleElement | null>(null);
+  const compDotHaloRef = useRef<SVGCircleElement | null>(null);
+  const compInputLineRef = useRef<SVGLineElement | null>(null);
+  const compOutputLineRef = useRef<SVGLineElement | null>(null);
+
+  useEffect(() => {
+    let raf = 0;
+    let inBuf: Float32Array | null = null;
+    let outBuf: Float32Array | null = null;
+    let smoothInDb = -60;
+    let smoothOutDb = -60;
+    const SMOOTH = 0.35; // higher = snappier dot, lower = lazier
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const inA = getLaneCompAnalyser(laneKey);
+      const outA = getLaneCompOutputAnalyser(laneKey);
+      const dot = compDotRef.current;
+      const halo = compDotHaloRef.current;
+      const vLine = compInputLineRef.current;
+      const hLine = compOutputLineRef.current;
+      if (!dot || !halo) return;
+
+      const rmsDb = (analyser: AnalyserNode | null, prev: Float32Array | null): { db: number; buf: Float32Array | null } => {
+        if (!analyser) return { db: -60, buf: prev };
+        const bins = analyser.fftSize;
+        let buf = prev;
+        if (!buf || buf.length !== bins) buf = new Float32Array(bins);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        analyser.getFloatTimeDomainData(buf as any);
+        let sum = 0;
+        for (let i = 0; i < bins; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / bins);
+        const db = rms > 1e-5 ? 20 * Math.log10(rms) : -60;
+        return { db, buf };
+      };
+
+      const inRes = rmsDb(inA, inBuf);
+      const outRes = rmsDb(outA, outBuf);
+      inBuf = inRes.buf; outBuf = outRes.buf;
+
+      smoothInDb += (inRes.db - smoothInDb) * SMOOTH;
+      smoothOutDb += (outRes.db - smoothOutDb) * SMOOTH;
+
+      const ix = dbToX(clamp(smoothInDb, DB_MIN, DB_MAX));
+      const iy = dbToY(clamp(smoothOutDb, DB_MIN, DB_MAX));
+
+      // Hide the dot when there's no signal, and dim under the noise
+      // floor so we're not staring at a stuck point at the bottom-left.
+      const visible = smoothInDb > -55;
+      dot.setAttribute('cx', String(ix));
+      dot.setAttribute('cy', String(iy));
+      dot.setAttribute('opacity', visible ? '1' : '0');
+      halo.setAttribute('cx', String(ix));
+      halo.setAttribute('cy', String(iy));
+      halo.setAttribute('opacity', visible ? '0.55' : '0');
+      // Faint guide lines: vertical from x-axis up to the dot (input
+      // level on the input axis), horizontal from dot to y-axis
+      // (output level on the output axis). Together they build the
+      // "where this audio sample lands on the curve" picture.
+      if (vLine) {
+        vLine.setAttribute('x1', String(ix));
+        vLine.setAttribute('x2', String(ix));
+        vLine.setAttribute('y1', String(GRAPH_PLOT_Y + GRAPH_PLOT_H));
+        vLine.setAttribute('y2', String(iy));
+        vLine.setAttribute('opacity', visible ? '0.35' : '0');
+      }
+      if (hLine) {
+        hLine.setAttribute('x1', String(GRAPH_PLOT_X));
+        hLine.setAttribute('x2', String(ix));
+        hLine.setAttribute('y1', String(iy));
+        hLine.setAttribute('y2', String(iy));
+        hLine.setAttribute('opacity', visible ? '0.35' : '0');
+      }
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [laneKey]);
+
   // Curve path: 1:1 from -60..threshold, then sloped to (0, compress(0)).
   const curvePath = useMemo(() => {
     const x0 = dbToX(DB_MIN);
@@ -327,6 +409,14 @@ export default function CompressorPanel({
             stroke="rgba(168,134,255,0.18)"
             strokeDasharray="2 2"
           />
+
+          {/* Live compression dot — rides along the transfer curve at
+              (current input dB, current output dB). Drawn before the
+              draggable knee circles so the knees stay on top. */}
+          <line ref={compInputLineRef} stroke="rgba(232, 213, 255, 0.55)" strokeWidth={1} strokeDasharray="2 2" opacity={0} />
+          <line ref={compOutputLineRef} stroke="rgba(232, 213, 255, 0.55)" strokeWidth={1} strokeDasharray="2 2" opacity={0} />
+          <circle ref={compDotHaloRef} r={9} fill="rgba(232, 213, 255, 0.30)" opacity={0} pointerEvents="none" />
+          <circle ref={compDotRef} r={3.5} fill="#f5e9ff" stroke="rgba(255,255,255,0.95)" strokeWidth={0.8} opacity={0} pointerEvents="none" style={{ filter: 'drop-shadow(0 0 4px #e9d5ff)' }} />
 
           {/* Threshold knee (left node) */}
           <circle cx={dbToX(threshold)} cy={dbToY(threshold)} r={9} fill="rgba(168,85,247,0.18)" />
