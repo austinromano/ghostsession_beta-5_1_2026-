@@ -128,14 +128,20 @@ export default function CompressorPanel({
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<'threshold' | 'ratio' | null>(null);
 
-  // Refs for the live "compression dot" — glowing point that rides
-  // along the transfer curve at (currentInputDb, currentOutputDb).
-  // Drawn via setAttribute in a rAF loop so React doesn't re-render
-  // the panel 60 times per second.
+  // Refs for the live visualizer overlay. The graph hosts:
+  //   - A scrolling time-history of input + output dB (input lighter,
+  //     output darker — the visible gap between them is the compression
+  //     happening in real time).
+  //   - The "compression dot" tracking the current (inputDb, outputDb)
+  //     point on the transfer curve, with two faint guide lines.
+  // All updates land via setAttribute in a single rAF loop so React
+  // never re-renders this panel during playback.
   const compDotRef = useRef<SVGCircleElement | null>(null);
   const compDotHaloRef = useRef<SVGCircleElement | null>(null);
   const compInputLineRef = useRef<SVGLineElement | null>(null);
   const compOutputLineRef = useRef<SVGLineElement | null>(null);
+  const inWavePathRef = useRef<SVGPathElement | null>(null);
+  const outWavePathRef = useRef<SVGPathElement | null>(null);
 
   useEffect(() => {
     let raf = 0;
@@ -143,7 +149,15 @@ export default function CompressorPanel({
     let outBuf: Float32Array | null = null;
     let smoothInDb = -60;
     let smoothOutDb = -60;
+    // Ring buffer of recent dB samples for the scrolling waveform.
+    // Sampled at the rAF rate (~60 Hz). 96 samples ≈ 1.6 seconds of
+    // audio history across the graph width.
+    const HISTORY_LEN = 96;
+    const inHistory: number[] = new Array(HISTORY_LEN).fill(-60);
+    const outHistory: number[] = new Array(HISTORY_LEN).fill(-60);
+    let head = 0;
     const SMOOTH = 0.35; // higher = snappier dot, lower = lazier
+    const yBottom = GRAPH_PLOT_Y + GRAPH_PLOT_H;
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const inA = getLaneCompAnalyser(laneKey);
@@ -152,6 +166,8 @@ export default function CompressorPanel({
       const halo = compDotHaloRef.current;
       const vLine = compInputLineRef.current;
       const hLine = compOutputLineRef.current;
+      const inWave = inWavePathRef.current;
+      const outWave = outWavePathRef.current;
       if (!dot || !halo) return;
 
       const rmsDb = (analyser: AnalyserNode | null, prev: Float32Array | null): { db: number; buf: Float32Array | null } => {
@@ -159,6 +175,8 @@ export default function CompressorPanel({
         const bins = analyser.fftSize;
         let buf = prev;
         if (!buf || buf.length !== bins) buf = new Float32Array(bins);
+        // Newer TS lib types narrow the param to Uint8Array<ArrayBuffer>;
+        // runtime contract is the same so cast at the call site.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         analyser.getFloatTimeDomainData(buf as any);
         let sum = 0;
@@ -174,6 +192,37 @@ export default function CompressorPanel({
 
       smoothInDb += (inRes.db - smoothInDb) * SMOOTH;
       smoothOutDb += (outRes.db - smoothOutDb) * SMOOTH;
+
+      // Append to history. Treat head as the OLDEST slot; we overwrite
+      // it with the newest value, then advance — this is the standard
+      // ring-buffer trick that keeps draw order O(N) without shifting.
+      inHistory[head] = smoothInDb;
+      outHistory[head] = smoothOutDb;
+      head = (head + 1) % HISTORY_LEN;
+
+      // Build scrolling-waveform paths. Index 0 of the visible series
+      // corresponds to the OLDEST sample (head, since head is the slot
+      // just overwritten and is now the eldest in modular order — wait,
+      // we just incremented head, so head now points at the slot to be
+      // overwritten next frame, which is the OLDEST current sample).
+      // Walk i = 0..HISTORY_LEN-1, reading from (head + i) % HISTORY_LEN.
+      if (inWave && outWave) {
+        const dx = GRAPH_PLOT_W / (HISTORY_LEN - 1);
+        let dIn = `M ${GRAPH_PLOT_X} ${yBottom}`;
+        let dOut = `M ${GRAPH_PLOT_X} ${yBottom}`;
+        for (let i = 0; i < HISTORY_LEN; i++) {
+          const idx = (head + i) % HISTORY_LEN;
+          const x = GRAPH_PLOT_X + i * dx;
+          const yI = dbToY(clamp(inHistory[idx], DB_MIN, DB_MAX));
+          const yO = dbToY(clamp(outHistory[idx], DB_MIN, DB_MAX));
+          dIn += ` L ${x.toFixed(2)} ${yI.toFixed(2)}`;
+          dOut += ` L ${x.toFixed(2)} ${yO.toFixed(2)}`;
+        }
+        dIn += ` L ${GRAPH_PLOT_X + GRAPH_PLOT_W} ${yBottom} Z`;
+        dOut += ` L ${GRAPH_PLOT_X + GRAPH_PLOT_W} ${yBottom} Z`;
+        inWave.setAttribute('d', dIn);
+        outWave.setAttribute('d', dOut);
+      }
 
       const ix = dbToX(clamp(smoothInDb, DB_MIN, DB_MAX));
       const iy = dbToY(clamp(smoothOutDb, DB_MIN, DB_MAX));
@@ -389,6 +438,16 @@ export default function CompressorPanel({
             </radialGradient>
           </defs>
 
+          {/* Live time-history of input + output dB. The X-axis maps
+              to time during this overlay (left = oldest, right = now);
+              Y stays in dB. Input draws lighter and bigger; output
+              draws darker and on top — the visible delta between the
+              two filled shapes IS the compression happening, frame by
+              frame. Path `d` is updated per-frame via ref so React
+              never re-renders this panel. */}
+          <path ref={inWavePathRef} fill="rgba(168, 134, 255, 0.22)" stroke="rgba(232, 213, 255, 0.55)" strokeWidth={0.8} />
+          <path ref={outWavePathRef} fill="rgba(124, 58, 237, 0.55)" stroke="rgba(168, 85, 247, 0.85)" strokeWidth={1} />
+
           {/* Subtle grid lines */}
           {[-48, -36, -24, -12].map((dB) => (
             <line key={`vg-${dB}`} x1={dbToX(dB)} y1={GRAPH_PLOT_Y} x2={dbToX(dB)} y2={GRAPH_PLOT_Y + GRAPH_PLOT_H} stroke="rgba(255,255,255,0.03)" />
@@ -397,9 +456,9 @@ export default function CompressorPanel({
             <line key={`hg-${dB}`} x1={GRAPH_PLOT_X} y1={dbToY(dB)} x2={GRAPH_PLOT_X + GRAPH_PLOT_W} y2={dbToY(dB)} stroke="rgba(255,255,255,0.03)" />
           ))}
 
-          {/* Filled area under curve */}
-          <path d={fillPath} fill="url(#compFillGrad)" />
-          {/* Curve */}
+          {/* Static transfer curve (reference shape — input dB on x,
+              output dB on y). No fill so the live waveform behind
+              stays the dominant visual. */}
           <path d={curvePath} fill="none" stroke={ACCENT} strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
 
           {/* Vertical threshold marker line */}
