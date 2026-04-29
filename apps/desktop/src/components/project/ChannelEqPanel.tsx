@@ -75,11 +75,11 @@ function formatGain(dB: number): string {
 }
 
 export default function ChannelEqPanel({
-  trackId,
+  laneKey,
   effect,
   onClose,
 }: {
-  trackId: string;
+  laneKey: string;
   effect: Effect;
   onClose?: () => void;
 }) {
@@ -141,7 +141,7 @@ export default function ChannelEqPanel({
     const y = (e.clientY - rect.top) * yRatio;
     const freq = xToFreq(x);
     const gain = yToGain(y);
-    setEqBand(trackId, effect.id, idx, { freq, gain });
+    setEqBand(laneKey, effect.id, idx, { freq, gain });
   };
 
   const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
@@ -155,7 +155,7 @@ export default function ChannelEqPanel({
   const onDoubleClickNode = (idx: number) => () => {
     // Snap gain back to 0 dB on double-click — same affordance as the
     // sample editor sliders. Frequency is preserved.
-    setEqBand(trackId, effect.id, idx, { gain: 0 });
+    setEqBand(laneKey, effect.id, idx, { gain: 0 });
   };
 
   const accent = '#a855f7';
@@ -186,7 +186,7 @@ export default function ChannelEqPanel({
         <span className="text-[12px] font-semibold text-white/90">Channel EQ</span>
         <button
           onPointerDown={(e) => e.stopPropagation()}
-          onClick={(e) => { e.stopPropagation(); toggleBypass(trackId, effect.id); }}
+          onClick={(e) => { e.stopPropagation(); toggleBypass(laneKey, effect.id); }}
           title={effect.bypassed ? 'Enable' : 'Bypass'}
           className="w-5 h-5 flex items-center justify-center rounded-full transition-colors hover:bg-white/10"
           style={{ color: effect.bypassed ? 'rgba(255,255,255,0.45)' : accent }}

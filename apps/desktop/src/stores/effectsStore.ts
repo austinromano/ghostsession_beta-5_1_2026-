@@ -82,6 +82,20 @@ export const EFFECT_HUE: Record<EffectKind, number> = {
 // Distinct from clip / sample-library MIMEs so handlers don't cross.
 export const EFFECT_DRAG_MIME = 'application/x-ghost-effect';
 
+/**
+ * The arrangement groups clips by `fileId` (same source = same lane).
+ * Effects are a property of the LANE, not an individual clip — this
+ * helper picks the right key from a track-shaped object so every reader
+ * agrees: drop site, chip strip, editor panel, audio routing.
+ *
+ * Falls back to `id` for tracks without a fileId (drum-rack rows etc.)
+ * so the key is always defined.
+ */
+export function laneKeyOf(track: { id?: string; fileId?: string | null } | null | undefined): string {
+  if (!track) return '';
+  return (track.fileId && track.fileId.length > 0) ? track.fileId : (track.id ?? '');
+}
+
 interface EffectsState {
   // projectId -> trackId -> Effect[]
   byProject: Map<string, Map<string, Effect[]>>;

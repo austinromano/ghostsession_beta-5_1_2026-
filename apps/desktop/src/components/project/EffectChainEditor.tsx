@@ -10,37 +10,26 @@ import ChannelEqPanel from './ChannelEqPanel';
 // follow-up; the chain shape is what matters here so the visual flow
 // (drop → reorder → bypass → delete) works end-to-end now.
 
-export default function EffectChainEditor({ trackId }: { trackId: string }) {
+export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
   // Subscribe to byProject so we re-render when other components mutate
   // the chain (drop on the lane, etc.). getChain reads off currentProjectId.
   const byProject = useEffectsStore((s) => s.byProject);
   void byProject;
-  const chain = useEffectsStore((s) => s.getChain(trackId));
+  const chain = useEffectsStore((s) => s.getChain(laneKey));
   const setOrder = useEffectsStore((s) => s.setOrder);
   const remove = useEffectsStore((s) => s.remove);
   const toggleBypass = useEffectsStore((s) => s.toggleBypass);
 
-  if (!chain || chain.length === 0) return null;
+  if (!laneKey || !chain || chain.length === 0) return null;
 
   return (
     <div className="shrink-0 mt-2 rounded-2xl glass flex overflow-hidden">
-      {/* Identity column — same width as the per-clip / bus identity
-          column so the layout reads consistently between modes. */}
-      <div className="shrink-0 w-[180px] flex flex-col gap-1 px-3 py-3 border-r border-white/[0.05]">
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#a855f7', boxShadow: '0 0 6px #a855f7' }} />
-          <span className="text-[12px] font-semibold text-white/90 uppercase tracking-wider">Track FX</span>
-        </div>
-        <div className="text-[10px] text-white/45 leading-snug">
-          Drag cards to reorder. ⊘ bypass, × remove. Drop more from the sidebar Effects section.
-        </div>
-      </div>
-      {/* Chain rail */}
+      {/* Chain rail spans the whole panel — no separate identity column. */}
       <div className="flex-1 min-w-0 px-3 py-3 overflow-x-auto">
         <Reorder.Group
           axis="x"
           values={chain.map((e) => e.id)}
-          onReorder={(newIds) => setOrder(trackId, newIds as string[])}
+          onReorder={(newIds) => setOrder(laneKey, newIds as string[])}
           className="flex gap-2 items-stretch"
           style={{ listStyle: 'none', padding: 0, margin: 0 }}
         >
@@ -60,9 +49,9 @@ export default function EffectChainEditor({ trackId }: { trackId: string }) {
                 >
                   <div className="flex items-stretch gap-1">
                     <ChannelEqPanel
-                      trackId={trackId}
+                      laneKey={laneKey}
                       effect={fx}
-                      onClose={() => remove(trackId, fx.id)}
+                      onClose={() => remove(laneKey, fx.id)}
                     />
                     {!isLast && (
                       <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>
@@ -76,8 +65,8 @@ export default function EffectChainEditor({ trackId }: { trackId: string }) {
                 key={fx.id}
                 fx={fx}
                 isLast={isLast}
-                onBypass={() => toggleBypass(trackId, fx.id)}
-                onRemove={() => remove(trackId, fx.id)}
+                onBypass={() => toggleBypass(laneKey, fx.id)}
+                onRemove={() => remove(laneKey, fx.id)}
               />
             );
           })}

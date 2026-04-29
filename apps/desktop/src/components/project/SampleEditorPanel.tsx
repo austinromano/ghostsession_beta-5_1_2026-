@@ -4,6 +4,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import Waveform from '../tracks/Waveform';
 import { samplePreview } from '../../lib/samplePreview';
 import EffectChainEditor from './EffectChainEditor';
+import { laneKeyOf } from '../../stores/effectsStore';
 
 // Bottom sample editor / clip inspector. Mounts at the bottom of the
 // arrangement view; shows when exactly one clip is selected. Big waveform,
@@ -137,9 +138,10 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
 
   return (
     <>
-      {/* Per-track FX chain — renders only when the selected track has at
-          least one effect dropped onto it. */}
-      <EffectChainEditor trackId={trackId} />
+      {/* Per-lane FX chain — keyed by fileId so every clip in the lane
+          resolves to the same chain. Falls back to the trackId for
+          tracks without a fileId (uncommon). */}
+      <EffectChainEditor laneKey={laneKeyOf(projectTrack)} />
     <div className="shrink-0 h-[140px] mt-2 rounded-2xl glass flex overflow-hidden">
       {/* Left: file info + metadata pills */}
       <div className="shrink-0 w-[220px] flex flex-col gap-2 px-3 py-2 border-r border-white/[0.05]">
