@@ -1,4 +1,4 @@
-import { Reorder } from 'framer-motion';
+import { Reorder, useDragControls } from 'framer-motion';
 import { useEffectsStore, EFFECT_HUE, EFFECT_LABEL, type Effect } from '../../stores/effectsStore';
 import { EffectIcon } from '../layout/EffectsSection';
 import ChannelEqPanel from './ChannelEqPanel';
@@ -39,29 +39,18 @@ export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
             // own bypass + close icons inside the header, so onBypass /
             // onRemove from this scope drive close = remove the effect.
             if (fx.kind === 'eq') {
-              // dragListener={false} disables Reorder.Item's pointer-down
-              // grab so the band-node drags inside the EQ graph don't get
-              // intercepted. Remove cursor-grab styling for the same
-              // reason — the panel is not reorderable.
+              // EQ panel is reorderable ONLY by the header strip — the
+              // body holds the band-node graph and must stay free.
+              // useDragControls lets us hand the start trigger to the
+              // header's pointer-down via ChannelEqPanel's prop.
               return (
-                <Reorder.Item
+                <EqChainItem
                   key={fx.id}
-                  value={fx.id}
-                  dragListener={false}
-                  style={{ listStyle: 'none' }}
-                  className="shrink-0"
-                >
-                  <div className="flex items-stretch gap-1">
-                    <ChannelEqPanel
-                      laneKey={laneKey}
-                      effect={fx}
-                      onClose={() => remove(laneKey, fx.id)}
-                    />
-                    {!isLast && (
-                      <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>
-                    )}
-                  </div>
-                </Reorder.Item>
+                  fx={fx}
+                  laneKey={laneKey}
+                  isLast={isLast}
+                  onClose={() => remove(laneKey, fx.id)}
+                />
               );
             }
             return (
@@ -77,6 +66,41 @@ export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
         </Reorder.Group>
       </div>
     </div>
+  );
+}
+
+// Reorder.Item wrapper for EQ panels. dragListener={false} keeps the
+// pointer-down on the body / graph from triggering reorder; the header
+// strip inside ChannelEqPanel calls dragControls.start(e) when the
+// user grabs it, so reorder is opt-in via that one strip only.
+function EqChainItem({ fx, laneKey, isLast, onClose }: {
+  fx: Effect;
+  laneKey: string;
+  isLast: boolean;
+  onClose: () => void;
+}) {
+  const dragControls = useDragControls();
+  return (
+    <Reorder.Item
+      value={fx.id}
+      dragListener={false}
+      dragControls={dragControls}
+      style={{ listStyle: 'none' }}
+      whileDrag={{ scale: 1.02, zIndex: 30, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
+      className="shrink-0"
+    >
+      <div className="flex items-stretch gap-1">
+        <ChannelEqPanel
+          laneKey={laneKey}
+          effect={fx}
+          onClose={onClose}
+          onHeaderPointerDown={(e) => dragControls.start(e)}
+        />
+        {!isLast && (
+          <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>
+        )}
+      </div>
+    </Reorder.Item>
   );
 }
 

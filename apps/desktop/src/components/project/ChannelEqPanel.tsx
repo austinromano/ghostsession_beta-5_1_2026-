@@ -78,10 +78,15 @@ export default function ChannelEqPanel({
   laneKey,
   effect,
   onClose,
+  onHeaderPointerDown,
 }: {
   laneKey: string;
   effect: Effect;
   onClose?: () => void;
+  // Optional: when supplied, the header strip becomes a drag handle
+  // for an outer Reorder.Item. The panel itself never starts a drag —
+  // only this hook lets the parent escalate the gesture to a reorder.
+  onHeaderPointerDown?: (e: React.PointerEvent<HTMLDivElement>) => void;
 }) {
   const setEqBand = useEffectsStore((s) => s.setEqBand);
   const toggleBypass = useEffectsStore((s) => s.toggleBypass);
@@ -173,8 +178,24 @@ export default function ChannelEqPanel({
         transition: 'opacity 120ms linear',
       }}
     >
-      {/* Header */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+      {/* Header — also acts as the drag handle for the outer
+          Reorder.Item when the parent supplies onHeaderPointerDown. */}
+      <div
+        className="flex items-center gap-2 px-3 py-2 border-b"
+        style={{
+          borderColor: 'rgba(255,255,255,0.05)',
+          cursor: onHeaderPointerDown ? 'grab' : 'default',
+          userSelect: 'none',
+        }}
+        onPointerDown={(e) => {
+          // Only escalate to reorder if the press lands on the strip
+          // itself, not on a button (bypass / close). Buttons have
+          // their own onPointerDown that stop propagation.
+          if (!onHeaderPointerDown) return;
+          if (e.button !== 0) return;
+          onHeaderPointerDown(e);
+        }}
+      >
         <span
           className="w-3 h-3 rotate-45"
           style={{
