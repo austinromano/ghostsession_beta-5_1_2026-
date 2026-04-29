@@ -11,10 +11,56 @@ import { create } from 'zustand';
 
 export type EffectKind = 'eq' | 'comp' | 'reverb';
 
+// Per-band EQ point — frequency in Hz, gain in dB. Four bands per EQ
+// instance, named Low / Low Mid / High Mid / High.
+export interface EqBand {
+  freq: number;
+  gain: number;
+}
+
+export interface EqParams {
+  bands: [EqBand, EqBand, EqBand, EqBand];
+}
+
+export interface CompParams {
+  threshold: number;
+  ratio: number;
+  makeup: number;
+}
+
+export interface ReverbParams {
+  wet: number;
+  decay: number;
+}
+
+export type EffectParams = EqParams | CompParams | ReverbParams;
+
 export interface Effect {
   id: string;
   kind: EffectKind;
   bypassed: boolean;
+  // Kind-specific params. Populated with the kind's defaults when the
+  // effect is created and migrated lazily for older persisted chains.
+  params?: EffectParams;
+}
+
+export const EQ_BAND_LABELS = ['Low', 'Low Mid', 'High Mid', 'High'] as const;
+
+export function defaultParams(kind: EffectKind): EffectParams {
+  if (kind === 'eq') {
+    return {
+      bands: [
+        { freq: 80, gain: 0 },
+        { freq: 1200, gain: 0 },
+        { freq: 3600, gain: 0 },
+        { freq: 12000, gain: 0 },
+      ],
+    };
+  }
+  if (kind === 'comp') {
+    return { threshold: -20, ratio: 4, makeup: 0 };
+  }
+  return { wet: 0.3, decay: 1.8 };
 }
 
 export const EFFECT_LABEL: Record<EffectKind, string> = {
@@ -52,6 +98,13 @@ interface EffectsState {
   toggleBypass: (trackId: string, effectId: string) => void;
   reorder: (trackId: string, fromIndex: number, toIndex: number) => void;
   setOrder: (trackId: string, effectIds: string[]) => void;
+  // Generic params updater — caller passes a partial that gets shallow-
+  // merged into the existing params blob. Kind-specific helpers can wrap
+  // this with stronger typing when needed.
+  setEffectParams: (trackId: string, effectId: string, partial: Partial<EffectParams>) => void;
+  // EQ-only helper: update one band by index. Keeps the bands tuple
+  // intact (length 4) so React selectors stay stable.
+  setEqBand: (trackId: string, effectId: string, bandIndex: number, patch: Partial<EqBand>) => void;
 }
 
 const EMPTY: Effect[] = [];
@@ -113,7 +166,10 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     const next = new Map(get().byProject);
     const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
     const existing = proj.get(trackId) ?? [];
-    const updated = [...existing, { id: newId(), kind, bypassed: false }];
+    const updated: Effect[] = [
+      ...existing,
+      { id: newId(), kind, bypassed: false, params: defaultParams(kind) },
+    ];
     proj.set(trackId, updated);
     next.set(pid, proj);
     set({ byProject: next });
@@ -172,6 +228,43 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     const byId = new Map(existing.map((e) => [e.id, e] as const));
     const updated = effectIds.map((id) => byId.get(id)).filter((e): e is Effect => !!e);
     if (updated.length !== existing.length) return; // ignore partial reorder payloads
+    proj.set(trackId, updated);
+    next.set(pid, proj);
+    set({ byProject: next });
+    persistProject(pid, proj);
+  },
+
+  setEffectParams: (trackId, effectId, partial) => {
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const next = new Map(get().byProject);
+    const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
+    const existing = proj.get(trackId) ?? [];
+    const updated = existing.map((e) => {
+      if (e.id !== effectId) return e;
+      const base = e.params ?? defaultParams(e.kind);
+      return { ...e, params: { ...base, ...partial } as EffectParams };
+    });
+    proj.set(trackId, updated);
+    next.set(pid, proj);
+    set({ byProject: next });
+    persistProject(pid, proj);
+  },
+
+  setEqBand: (trackId, effectId, bandIndex, patch) => {
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    if (bandIndex < 0 || bandIndex > 3) return;
+    const next = new Map(get().byProject);
+    const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
+    const existing = proj.get(trackId) ?? [];
+    const updated = existing.map((e) => {
+      if (e.id !== effectId || e.kind !== 'eq') return e;
+      const base = (e.params as EqParams | undefined) ?? (defaultParams('eq') as EqParams);
+      const newBands = [...base.bands] as [EqBand, EqBand, EqBand, EqBand];
+      newBands[bandIndex] = { ...newBands[bandIndex], ...patch };
+      return { ...e, params: { bands: newBands } };
+    });
     proj.set(trackId, updated);
     next.set(pid, proj);
     set({ byProject: next });

@@ -1,6 +1,7 @@
 import { Reorder } from 'framer-motion';
 import { useEffectsStore, EFFECT_HUE, EFFECT_LABEL, type Effect } from '../../stores/effectsStore';
 import { EffectIcon } from '../layout/EffectsSection';
+import ChannelEqPanel from './ChannelEqPanel';
 
 // Per-track FX chain editor. Sits above the per-clip controls in
 // SampleEditorPanel whenever the selected track has at least one effect.
@@ -43,15 +44,43 @@ export default function EffectChainEditor({ trackId }: { trackId: string }) {
           className="flex gap-2 items-stretch"
           style={{ listStyle: 'none', padding: 0, margin: 0 }}
         >
-          {chain.map((fx, idx) => (
-            <ChainCard
-              key={fx.id}
-              fx={fx}
-              isLast={idx === chain.length - 1}
-              onBypass={() => toggleBypass(trackId, fx.id)}
-              onRemove={() => remove(trackId, fx.id)}
-            />
-          ))}
+          {chain.map((fx, idx) => {
+            const isLast = idx === chain.length - 1;
+            // EQ renders the full Channel EQ widget. The panel owns its
+            // own bypass + close icons inside the header, so onBypass /
+            // onRemove from this scope drive close = remove the effect.
+            if (fx.kind === 'eq') {
+              return (
+                <Reorder.Item
+                  key={fx.id}
+                  value={fx.id}
+                  style={{ listStyle: 'none' }}
+                  whileDrag={{ scale: 1.02, zIndex: 30, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
+                  className="shrink-0 cursor-grab active:cursor-grabbing"
+                >
+                  <div className="flex items-stretch gap-1">
+                    <ChannelEqPanel
+                      trackId={trackId}
+                      effect={fx}
+                      onClose={() => remove(trackId, fx.id)}
+                    />
+                    {!isLast && (
+                      <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>
+                    )}
+                  </div>
+                </Reorder.Item>
+              );
+            }
+            return (
+              <ChainCard
+                key={fx.id}
+                fx={fx}
+                isLast={isLast}
+                onBypass={() => toggleBypass(trackId, fx.id)}
+                onRemove={() => remove(trackId, fx.id)}
+              />
+            );
+          })}
         </Reorder.Group>
       </div>
     </div>
