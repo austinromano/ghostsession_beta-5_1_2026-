@@ -3,6 +3,7 @@ import { useAudioStore } from '../../stores/audioStore';
 import { useProjectStore } from '../../stores/projectStore';
 import Waveform from '../tracks/Waveform';
 import { samplePreview } from '../../lib/samplePreview';
+import EffectChainEditor from './EffectChainEditor';
 
 // Bottom sample editor / clip inspector. Mounts at the bottom of the
 // arrangement view; shows when exactly one clip is selected. Big waveform,
@@ -135,6 +136,10 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
 
   return (
+    <>
+      {/* Per-track FX chain — renders only when the selected track has at
+          least one effect dropped onto it. */}
+      <EffectChainEditor trackId={trackId} />
     <div className="shrink-0 h-[140px] mt-2 rounded-2xl glass flex overflow-hidden">
       {/* Left: file info + metadata pills */}
       <div className="shrink-0 w-[220px] flex flex-col gap-2 px-3 py-2 border-r border-white/[0.05]">
@@ -248,10 +253,12 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
           onChange={applyPan}
         />
         <div className="text-[9px] text-white/30 italic mt-2 leading-tight">
-          EQ / Comp / Reverb live on the Master Bus. Click the bus track to edit.
+          Drag EQ / Comp / Reverb from the sidebar onto a track to build a per-track chain.
+          Master-bus FX still live on the bus — click it to edit.
         </div>
       </div>
     </div>
+    </>
   );
 }
 

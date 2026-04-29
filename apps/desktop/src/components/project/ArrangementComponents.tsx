@@ -11,6 +11,7 @@ import Avatar from '../common/Avatar';
 import { useDrumRack, getRowAnalyser } from '../../stores/drumRackStore';
 import { getDrumAnalyser } from '../../stores/audio/graph';
 import { SAMPLE_LIBRARY_DRAG_MIME } from '../layout/SampleLibrarySection';
+import { useEffectsStore, EFFECT_DRAG_MIME, EFFECT_HUE, type EffectKind } from '../../stores/effectsStore';
 
 type Member = { userId: string; displayName: string; avatarUrl: string | null };
 
@@ -22,6 +23,48 @@ export const TRACK_HEADER_WIDTH = 110;
 // Same hue palette the Waveform uses, so the lane header's accent strip
 // always matches the colour of the clips inside it.
 const LANE_HUE_PALETTE = [270, 165, 300, 220, 190, 330];
+
+// Tiny chip strip rendered in the track header's top row. Shows up to 3
+// effect kind initials; if more are present, a "+N" trailer summarises.
+// Bypassed effects render at 30 % opacity so the strip still answers
+// "what's on this track" at a glance.
+function HeaderEffectChips({ trackId }: { trackId: string }) {
+  // Subscribe to byProject so the chip strip re-renders on add / remove /
+  // bypass-toggle / reorder. getChain reads off currentProjectId inside
+  // the store closure.
+  const byProject = useEffectsStore((s) => s.byProject);
+  void byProject;
+  const chain = useEffectsStore((s) => s.getChain(trackId));
+  if (!chain || chain.length === 0) return null;
+  const visible = chain.slice(0, 3);
+  const extra = chain.length - visible.length;
+  const initial: Record<EffectKind, string> = { eq: 'EQ', comp: 'CP', reverb: 'RV' };
+  return (
+    <span className="shrink-0 flex items-center gap-0.5 mr-1">
+      {visible.map((fx) => {
+        const hue = EFFECT_HUE[fx.kind];
+        return (
+          <span
+            key={fx.id}
+            className="text-[7px] font-bold tracking-wide rounded-sm px-1 py-px"
+            style={{
+              background: `hsla(${hue}, 80%, 50%, ${fx.bypassed ? 0.10 : 0.25})`,
+              color: fx.bypassed ? 'rgba(255,255,255,0.35)' : `hsl(${hue}, 90%, 80%)`,
+              border: `1px solid hsla(${hue}, 80%, 60%, ${fx.bypassed ? 0.15 : 0.4})`,
+              textShadow: 'none',
+            }}
+            title={`${fx.kind.toUpperCase()}${fx.bypassed ? ' (bypassed)' : ''}`}
+          >
+            {initial[fx.kind]}
+          </span>
+        );
+      })}
+      {extra > 0 && (
+        <span className="text-[7px] font-bold text-white/60 px-1">+{extra}</span>
+      )}
+    </span>
+  );
+}
 
 function laneHueForKey(key: string): number {
   let h = 0;
@@ -143,6 +186,7 @@ function TrackHeader({ name, hue, isSelected, trackIds, meter, controls }: {
           <span className="text-[10px] font-semibold text-white/95 truncate flex-1" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
             {cleanName}
           </span>
+          <HeaderEffectChips trackId={trackIds[0] ?? ''} />
           <span
             className="shrink-0 w-1.5 h-1.5 rounded-full"
             style={{ background: accent, boxShadow: `0 0 4px ${accent}` }}
@@ -1511,16 +1555,55 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
     window.dispatchEvent(new CustomEvent('ghost-refresh-project'));
   };
 
+  // Effect-drop target: when a chip is dragged from the sidebar's
+  // Effects section, accept the drop and append the new effect to this
+  // lane's primary track id. Other drags (clip drags, sample-library
+  // drags) must NOT call preventDefault so they stay on the existing
+  // codepaths.
+  const [fxDragOver, setFxDragOver] = useState(false);
+  const isEffectDrag = (dt: DataTransfer) => {
+    for (const t of Array.from(dt.types)) if (t === EFFECT_DRAG_MIME) return true;
+    return false;
+  };
+  const onFxDragOver = (e: React.DragEvent) => {
+    if (!isEffectDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!fxDragOver) setFxDragOver(true);
+  };
+  const onFxDragLeave = (e: React.DragEvent) => {
+    if (!isEffectDrag(e.dataTransfer)) return;
+    setFxDragOver(false);
+  };
+  const onFxDrop = (e: React.DragEvent) => {
+    if (!isEffectDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFxDragOver(false);
+    try {
+      const raw = e.dataTransfer.getData(EFFECT_DRAG_MIME);
+      const payload = JSON.parse(raw) as { kind: EffectKind };
+      const targetTrackId = laneTracks[0]?.id;
+      if (!targetTrackId || !payload?.kind) return;
+      useEffectsStore.getState().add(targetTrackId, payload.kind);
+    } catch { /* malformed payload — ignore */ }
+  };
+
   return (
     <Reorder.Item
       value={laneKey}
       dragListener={false}
       dragControls={dragControls}
       className="flex"
-      style={{ height: laneHeight }}
+      style={{ height: laneHeight, position: 'relative' }}
       whileDrag={{ scale: 1.005, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
       transition={{ duration: 0.15 }}
       as="div"
+      onDragOver={onFxDragOver}
+      onDragEnter={onFxDragOver}
+      onDragLeave={onFxDragLeave}
+      onDrop={onFxDrop}
     >
       {/* Track header is the drag handle. data-track-header lets the
           marquee handler bail out without starting a rubber-band. */}
@@ -1576,6 +1659,23 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
             members={members}
           />
         ))}
+        {fxDragOver && (
+          <div
+            className="absolute inset-0 pointer-events-none rounded-r-lg flex items-center justify-center"
+            style={{
+              background: 'rgba(168, 85, 247, 0.10)',
+              boxShadow: 'inset 0 0 0 2px rgba(168, 85, 247, 0.55)',
+              zIndex: 5,
+            }}
+          >
+            <span
+              className="text-[11px] font-bold tracking-wider uppercase text-white px-2 py-1 rounded-md"
+              style={{ background: 'rgba(168, 85, 247, 0.35)', backdropFilter: 'blur(4px)' }}
+            >
+              Drop to add effect
+            </span>
+          </div>
+        )}
       </div>
       {headerMenu && (
         <div

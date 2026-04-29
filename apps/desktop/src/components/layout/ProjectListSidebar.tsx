@@ -6,6 +6,7 @@ import { useAudioStore } from '../../stores/audioStore';
 import { ROOMS as COMMUNITY_ROOMS } from '../social/CommunityRooms';
 import { useCommunityStore } from '../../stores/communityStore';
 import SampleLibrarySection from './SampleLibrarySection';
+import EffectsSection from './EffectsSection';
 import Avatar from '../common/Avatar';
 
 export type { SamplePack };
@@ -451,6 +452,10 @@ function ProjectListSidebar({
           );
           if (sectionKey === 'samples') return (
         <Reorder.Item key="samples" value="samples" style={{ listStyle: 'none' }} className="cursor-grab active:cursor-grabbing" whileDrag={{ scale: 1.02, zIndex: 50, boxShadow: '0 4px 20px rgba(0,0,0,0.4)' }}>
+          {/* Effects sits above the Sample Library inside the same draggable
+              section slot so users still see them as a single block of
+              "stuff you can drop into the project". */}
+          <EffectsSection />
           <SampleLibrarySection />
         </Reorder.Item>
           );

@@ -8,6 +8,7 @@ import Avatar from '../common/Avatar';
 import ChatPanel from '../session/ChatPanel';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useAudioStore } from '../../stores/audioStore';
+import { useEffectsStore } from '../../stores/effectsStore';
 import { API_BASE } from '../../lib/constants';
 import { devWarn } from '../../lib/log';
 
@@ -200,6 +201,12 @@ export default function PluginLayout() {
       setSelectedProjectId(null);
     }
   }, [projects, selectedProjectId]);
+
+  // Mirror selectedProjectId into the effects store so per-track effect
+  // chains hydrate from localStorage scoped to the active project.
+  useEffect(() => {
+    useEffectsStore.getState().setProject(selectedProjectId);
+  }, [selectedProjectId]);
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem('ghost_sidebar_collapsed') !== '0');
   useEffect(() => {
