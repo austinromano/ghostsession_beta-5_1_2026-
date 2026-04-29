@@ -39,13 +39,17 @@ export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
             // own bypass + close icons inside the header, so onBypass /
             // onRemove from this scope drive close = remove the effect.
             if (fx.kind === 'eq') {
+              // dragListener={false} disables Reorder.Item's pointer-down
+              // grab so the band-node drags inside the EQ graph don't get
+              // intercepted. Remove cursor-grab styling for the same
+              // reason — the panel is not reorderable.
               return (
                 <Reorder.Item
                   key={fx.id}
                   value={fx.id}
+                  dragListener={false}
                   style={{ listStyle: 'none' }}
-                  whileDrag={{ scale: 1.02, zIndex: 30, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
-                  className="shrink-0 cursor-grab active:cursor-grabbing"
+                  className="shrink-0"
                 >
                   <div className="flex items-stretch gap-1">
                     <ChannelEqPanel
