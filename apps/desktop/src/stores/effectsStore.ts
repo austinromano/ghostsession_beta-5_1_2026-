@@ -44,8 +44,15 @@ export interface EqParams {
 }
 
 export interface CompParams {
+  // Threshold in dBFS, -60..0
   threshold: number;
+  // Ratio :1, 1..20
   ratio: number;
+  // Attack envelope in ms, 1..200
+  attack: number;
+  // Release envelope in ms, 10..1000
+  release: number;
+  // Makeup gain in dB, -20..20
   makeup: number;
 }
 
@@ -79,7 +86,7 @@ export function defaultParams(kind: EffectKind): EffectParams {
     };
   }
   if (kind === 'comp') {
-    return { threshold: -20, ratio: 4, makeup: 0 };
+    return { threshold: -18, ratio: 4, attack: 10, release: 100, makeup: 2 };
   }
   return { wet: 0.3, decay: 1.8 };
 }
@@ -140,6 +147,8 @@ interface EffectsState {
   // EQ-only helper: update one band by index. Keeps the bands tuple
   // intact (length 4) so React selectors stay stable.
   setEqBand: (trackId: string, effectId: string, bandIndex: number, patch: Partial<EqBand>) => void;
+  // Comp-only helper: update a single field on the compressor params.
+  setCompParam: (trackId: string, effectId: string, field: keyof CompParams, value: number) => void;
 }
 
 const EMPTY: Effect[] = [];
@@ -297,6 +306,25 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     next.set(pid, proj);
     set({ byProject: next });
     persistProject(pid, proj);
+  },
+
+  setCompParam: (trackId, effectId, field, value) => {
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const next = new Map(get().byProject);
+    const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
+    const existing = proj.get(trackId) ?? [];
+    const updated = existing.map((e) => {
+      if (e.id !== effectId || e.kind !== 'comp') return e;
+      const base = (e.params as CompParams | undefined) ?? (defaultParams('comp') as CompParams);
+      return { ...e, params: { ...base, [field]: value } as CompParams };
+    });
+    proj.set(trackId, updated);
+    next.set(pid, proj);
+    set({ byProject: next });
+    persistProject(pid, proj);
+    // DSP routing for comp lands in a follow-up; visual params persist
+    // here so the curve / knob state survives reloads.
   },
 
   setEqBand: (trackId, effectId, bandIndex, patch) => {

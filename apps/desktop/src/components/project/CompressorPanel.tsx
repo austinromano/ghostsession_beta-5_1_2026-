@@ -1,0 +1,512 @@
+import { useMemo, useRef } from 'react';
+import {
+  defaultParams,
+  useEffectsStore,
+  type CompParams,
+  type Effect,
+} from '../../stores/effectsStore';
+
+// Compressor panel — visual-first. Mirrors the user-supplied design:
+//
+//   ┌──────────────────────────────────┐
+//   │ ⋮⋮  ◆ Compressor          [×]    │
+//   ├──────────────────────────────────┤
+//   │ ▮  ┌──────────────┐ Threshold    │
+//   │ ▮  │  transfer    │ -18.0 dB     │
+//   │ ▮  │  curve graph │ Ratio        │
+//   │ ▮  │ with 2 knees │ 4.0:1        │
+//   │ ▮  └──────────────┘ Attack ...   │
+//   ├──────────────────────────────────┤
+//   │   ◯ knob       ◯ knob            │
+//   │   10 ms        100 ms            │
+//   └──────────────────────────────────┘
+//
+// Drag the threshold point (left knee) to retune threshold.
+// Drag the ratio point (right knee) vertically to retune ratio.
+// Knobs handle attack + release with vertical-drag-to-change.
+//
+// DSP routing not wired yet — params persist via effectsStore so the
+// audio layer can mirror them once a comp worklet is ready per track.
+
+const PANEL_W = 304;
+
+// Transfer-curve graph dimensions.
+const GRAPH_VIEW_W = 170;
+const GRAPH_VIEW_H = 130;
+const GRAPH_PAD = 8;
+const GRAPH_PLOT_X = GRAPH_PAD;
+const GRAPH_PLOT_Y = GRAPH_PAD;
+const GRAPH_PLOT_W = GRAPH_VIEW_W - GRAPH_PAD * 2;
+const GRAPH_PLOT_H = GRAPH_VIEW_H - GRAPH_PAD * 2;
+
+// dB ranges drawn by the transfer curve.
+const DB_MIN = -60;
+const DB_MAX = 0;
+
+const RATIO_MIN = 1;
+const RATIO_MAX = 20;
+
+const ATTACK_MIN = 1;
+const ATTACK_MAX = 200;
+const RELEASE_MIN = 10;
+const RELEASE_MAX = 1000;
+
+const ACCENT = '#a855f7';
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, v));
+}
+
+function dbToX(dB: number): number {
+  const t = (dB - DB_MIN) / (DB_MAX - DB_MIN);
+  return GRAPH_PLOT_X + t * GRAPH_PLOT_W;
+}
+function dbToY(dB: number): number {
+  // Higher dB → smaller y (top of graph).
+  const t = (dB - DB_MIN) / (DB_MAX - DB_MIN);
+  return GRAPH_PLOT_Y + (1 - t) * GRAPH_PLOT_H;
+}
+function xToDb(x: number): number {
+  const t = clamp((x - GRAPH_PLOT_X) / GRAPH_PLOT_W, 0, 1);
+  return DB_MIN + t * (DB_MAX - DB_MIN);
+}
+function yToDb(y: number): number {
+  const t = clamp((y - GRAPH_PLOT_Y) / GRAPH_PLOT_H, 0, 1);
+  return DB_MIN + (1 - t) * (DB_MAX - DB_MIN);
+}
+
+// Compute the output dB at input dB given threshold + ratio.
+// Below threshold: output = input. Above: output = threshold + (input - threshold) / ratio.
+function compress(inDb: number, threshold: number, ratio: number): number {
+  if (inDb <= threshold) return inDb;
+  return threshold + (inDb - threshold) / ratio;
+}
+
+function formatThreshold(dB: number): string {
+  return `${dB.toFixed(1)} dB`;
+}
+function formatRatio(r: number): string {
+  return `${r.toFixed(1)}:1`;
+}
+function formatMs(ms: number): string {
+  return ms >= 100 ? `${Math.round(ms)} ms` : `${ms.toFixed(0)} ms`;
+}
+function formatGain(dB: number): string {
+  const sign = dB >= 0 ? '+' : '';
+  return `${sign}${dB.toFixed(1)} dB`;
+}
+
+export default function CompressorPanel({
+  laneKey,
+  effect,
+  onClose,
+  onHeaderPointerDown,
+}: {
+  laneKey: string;
+  effect: Effect;
+  onClose?: () => void;
+  onHeaderPointerDown?: (e: React.PointerEvent<HTMLElement>) => void;
+}) {
+  const setCompParam = useEffectsStore((s) => s.setCompParam);
+  const toggleBypass = useEffectsStore((s) => s.toggleBypass);
+
+  const params: CompParams = useMemo(() => {
+    if (effect.params && 'threshold' in effect.params) return effect.params as CompParams;
+    return defaultParams('comp') as CompParams;
+  }, [effect.params]);
+
+  const { threshold, ratio, attack, release, makeup } = params;
+
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const dragRef = useRef<'threshold' | 'ratio' | null>(null);
+
+  // Curve path: 1:1 from -60..threshold, then sloped to (0, compress(0)).
+  const curvePath = useMemo(() => {
+    const x0 = dbToX(DB_MIN);
+    const y0 = dbToY(DB_MIN);
+    const xT = dbToX(threshold);
+    const yT = dbToY(threshold);
+    const x1 = dbToX(DB_MAX);
+    const y1 = dbToY(compress(DB_MAX, threshold, ratio));
+    return `M ${x0} ${y0} L ${xT} ${yT} L ${x1} ${y1}`;
+  }, [threshold, ratio]);
+
+  const fillPath = useMemo(() => {
+    const x0 = dbToX(DB_MIN);
+    const xT = dbToX(threshold);
+    const yT = dbToY(threshold);
+    const x1 = dbToX(DB_MAX);
+    const y1 = dbToY(compress(DB_MAX, threshold, ratio));
+    const yBottom = GRAPH_PLOT_Y + GRAPH_PLOT_H;
+    return `M ${x0} ${yBottom} L ${x0} ${dbToY(DB_MIN)} L ${xT} ${yT} L ${x1} ${y1} L ${x1} ${yBottom} Z`;
+  }, [threshold, ratio]);
+
+  const onPointerDown = (which: 'threshold' | 'ratio') => (e: React.PointerEvent<SVGCircleElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    dragRef.current = which;
+  };
+
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const which = dragRef.current;
+    if (!which) return;
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    const xRatio = GRAPH_VIEW_W / rect.width;
+    const yRatio = GRAPH_VIEW_H / rect.height;
+    const x = (e.clientX - rect.left) * xRatio;
+    const y = (e.clientY - rect.top) * yRatio;
+
+    if (which === 'threshold') {
+      // Threshold knee — moves along the y=x diagonal (since at the
+      // knee, output equals input). Use x to derive threshold dB,
+      // clamp into range. Snap the knee to land on the diagonal.
+      const newThreshold = clamp(xToDb(x), DB_MIN, DB_MAX);
+      setCompParam(laneKey, effect.id, 'threshold', newThreshold);
+    } else {
+      // Ratio handle — at input = 0 dB on the curve. Derive ratio
+      // from the y position: output(0) = threshold + (-threshold)/ratio.
+      // Solve for ratio given output(0) = yToDb(y).
+      const out0 = clamp(yToDb(y), DB_MIN, DB_MAX);
+      // out0 = threshold + (0 - threshold) / ratio
+      //      = threshold * (1 - 1/ratio)
+      // → 1/ratio = 1 - out0/threshold
+      // (only valid when threshold < 0; threshold == 0 is a degenerate
+      //  case where any ratio yields out0 = 0, so leave ratio alone.)
+      if (threshold < -0.5) {
+        const inv = 1 - out0 / threshold;
+        const newRatio = clamp(1 / Math.max(0.05, inv), RATIO_MIN, RATIO_MAX);
+        setCompParam(laneKey, effect.id, 'ratio', newRatio);
+      }
+    }
+  };
+
+  const onPointerUp = (e: React.PointerEvent<SVGSVGElement>) => {
+    if (!dragRef.current) return;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    dragRef.current = null;
+  };
+
+  const dimmed = effect.bypassed ? 0.5 : 1;
+
+  return (
+    <div
+      className="rounded-xl select-none"
+      style={{
+        width: PANEL_W,
+        background: 'rgba(15, 12, 32, 0.92)',
+        border: '1px solid rgba(168, 134, 255, 0.18)',
+        boxShadow: '0 8px 24px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)',
+        opacity: dimmed,
+        transition: 'opacity 120ms linear',
+      }}
+    >
+      {/* Header */}
+      <div
+        className="flex items-center gap-2 px-3 py-2 border-b"
+        style={{ borderColor: 'rgba(255,255,255,0.05)', userSelect: 'none' }}
+      >
+        {onHeaderPointerDown && (
+          <button
+            type="button"
+            aria-label="Drag to reorder"
+            title="Drag to reorder"
+            className="shrink-0 -ml-1 flex items-center justify-center w-5 h-5 rounded text-white/40 hover:text-white/85 transition-colors"
+            style={{ cursor: 'grab', touchAction: 'none' }}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              onHeaderPointerDown(e);
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="9" cy="5" r="1.6" /><circle cx="9" cy="12" r="1.6" /><circle cx="9" cy="19" r="1.6" />
+              <circle cx="15" cy="5" r="1.6" /><circle cx="15" cy="12" r="1.6" /><circle cx="15" cy="19" r="1.6" />
+            </svg>
+          </button>
+        )}
+        <span
+          className="w-3 h-3 rotate-45"
+          style={{
+            background: 'linear-gradient(135deg, #c084fc 0%, #7c3aed 100%)',
+            borderRadius: 2,
+            boxShadow: `0 0 6px ${ACCENT}`,
+          }}
+        />
+        <span className="text-[12px] font-semibold text-white/90">Compressor</span>
+        <button
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); toggleBypass(laneKey, effect.id); }}
+          title={effect.bypassed ? 'Enable' : 'Bypass'}
+          className="w-5 h-5 flex items-center justify-center rounded-full transition-colors hover:bg-white/10"
+          style={{ color: effect.bypassed ? 'rgba(255,255,255,0.45)' : ACCENT }}
+        >
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="4.93" y1="4.93" x2="19.07" y2="19.07" />
+          </svg>
+        </button>
+        <span className="ml-auto" />
+        {onClose && (
+          <button
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => { e.stopPropagation(); onClose(); }}
+            title="Close"
+            className="w-5 h-5 flex items-center justify-center rounded text-white/55 hover:text-white hover:bg-white/10 transition-colors"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        )}
+      </div>
+
+      {/* Body: meter + curve + readouts */}
+      <div className="flex gap-2 px-3 pt-2">
+        {/* Meter column */}
+        <div className="flex flex-col items-center gap-1 shrink-0" style={{ width: 28 }}>
+          <span className="text-[9px] font-semibold text-white/55 uppercase tracking-wider">High</span>
+          <Meter />
+        </div>
+
+        {/* Transfer-curve graph */}
+        <svg
+          ref={svgRef}
+          viewBox={`0 0 ${GRAPH_VIEW_W} ${GRAPH_VIEW_H}`}
+          width={GRAPH_VIEW_W}
+          height={GRAPH_VIEW_H}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          style={{ display: 'block', flexShrink: 0 }}
+        >
+          <defs>
+            <linearGradient id="compFillGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={ACCENT} stopOpacity="0.36" />
+              <stop offset="100%" stopColor={ACCENT} stopOpacity="0.04" />
+            </linearGradient>
+            <radialGradient id="compNodeGrad" cx="0.5" cy="0.5" r="0.5">
+              <stop offset="0%" stopColor="#e9d5ff" />
+              <stop offset="60%" stopColor={ACCENT} />
+              <stop offset="100%" stopColor="#6d28d9" />
+            </radialGradient>
+          </defs>
+
+          {/* Subtle grid lines */}
+          {[-48, -36, -24, -12].map((dB) => (
+            <line key={`vg-${dB}`} x1={dbToX(dB)} y1={GRAPH_PLOT_Y} x2={dbToX(dB)} y2={GRAPH_PLOT_Y + GRAPH_PLOT_H} stroke="rgba(255,255,255,0.03)" />
+          ))}
+          {[-48, -36, -24, -12].map((dB) => (
+            <line key={`hg-${dB}`} x1={GRAPH_PLOT_X} y1={dbToY(dB)} x2={GRAPH_PLOT_X + GRAPH_PLOT_W} y2={dbToY(dB)} stroke="rgba(255,255,255,0.03)" />
+          ))}
+
+          {/* Filled area under curve */}
+          <path d={fillPath} fill="url(#compFillGrad)" />
+          {/* Curve */}
+          <path d={curvePath} fill="none" stroke={ACCENT} strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
+
+          {/* Vertical threshold marker line */}
+          <line
+            x1={dbToX(threshold)} y1={GRAPH_PLOT_Y}
+            x2={dbToX(threshold)} y2={GRAPH_PLOT_Y + GRAPH_PLOT_H}
+            stroke="rgba(168,134,255,0.18)"
+            strokeDasharray="2 2"
+          />
+
+          {/* Threshold knee (left node) */}
+          <circle cx={dbToX(threshold)} cy={dbToY(threshold)} r={9} fill="rgba(168,85,247,0.18)" />
+          <circle
+            cx={dbToX(threshold)}
+            cy={dbToY(threshold)}
+            r={5}
+            fill="url(#compNodeGrad)"
+            stroke="rgba(255,255,255,0.85)"
+            strokeWidth={1.2}
+            style={{ cursor: 'grab', filter: `drop-shadow(0 0 4px ${ACCENT})` }}
+            onPointerDown={onPointerDown('threshold')}
+          />
+
+          {/* Ratio knee (right node, at input = 0 dB) */}
+          {(() => {
+            const cx = dbToX(DB_MAX);
+            const cy = dbToY(compress(DB_MAX, threshold, ratio));
+            return (
+              <>
+                <circle cx={cx} cy={cy} r={9} fill="rgba(168,85,247,0.18)" />
+                <circle
+                  cx={cx}
+                  cy={cy}
+                  r={5}
+                  fill="url(#compNodeGrad)"
+                  stroke="rgba(255,255,255,0.85)"
+                  strokeWidth={1.2}
+                  style={{ cursor: 'grab', filter: `drop-shadow(0 0 4px ${ACCENT})` }}
+                  onPointerDown={onPointerDown('ratio')}
+                />
+              </>
+            );
+          })()}
+        </svg>
+
+        {/* Readouts column */}
+        <div className="flex flex-col gap-1.5 text-right grow shrink-0 pl-1">
+          <ReadoutRow label="Threshold" value={formatThreshold(threshold)} />
+          <ReadoutRow label="Ratio" value={formatRatio(ratio)} />
+          <ReadoutRow label="Attack" value={formatMs(attack)} />
+          <ReadoutRow label="Release" value={formatMs(release)} />
+          <ReadoutRow label="Makeup" value={formatGain(makeup)} />
+        </div>
+      </div>
+
+      {/* Knob row */}
+      <div className="flex items-center justify-around px-3 pt-2 pb-3 mt-1">
+        <Knob
+          label={formatMs(attack)}
+          value={attack}
+          min={ATTACK_MIN}
+          max={ATTACK_MAX}
+          onChange={(v) => setCompParam(laneKey, effect.id, 'attack', v)}
+        />
+        <Knob
+          label={formatMs(release)}
+          value={release}
+          min={RELEASE_MIN}
+          max={RELEASE_MAX}
+          onChange={(v) => setCompParam(laneKey, effect.id, 'release', v)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ReadoutRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col items-end leading-tight">
+      <span className="text-[9.5px] uppercase tracking-wider text-white/50">{label}</span>
+      <span className="text-[12px] font-semibold tabular-nums text-white/90">{value}</span>
+    </div>
+  );
+}
+
+// Static gradient meter — visual placeholder. Live amplitude tap will
+// land when DSP routing for the compressor is wired.
+function Meter() {
+  const SEGMENTS = 14;
+  return (
+    <div
+      className="rounded-sm overflow-hidden flex flex-col-reverse items-stretch gap-[1px] py-[1px] px-[1px]"
+      style={{ width: 12, height: 110, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
+    >
+      {Array.from({ length: SEGMENTS }, (_, i) => {
+        const t = i / (SEGMENTS - 1);
+        // Green at the bottom, yellow in the middle, red near the top.
+        const hue = 120 - t * 120;
+        const lit = i < Math.round(SEGMENTS * 0.55);
+        return (
+          <div
+            key={i}
+            style={{
+              flex: 1,
+              background: lit ? `hsl(${hue}, 80%, 50%)` : 'rgba(255,255,255,0.04)',
+              opacity: lit ? 0.85 : 1,
+              borderRadius: 1,
+            }}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// Round purple knob — drag vertically to change the value. Used for
+// Attack and Release. Visual style: outer ring with a value-arc inside,
+// label below.
+function Knob({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (v: number) => void }) {
+  const dragStartRef = useRef<{ y: number; v: number } | null>(null);
+
+  // Map value → arc end angle. -135° (bottom-left) to +135° (bottom-right).
+  const t = clamp((value - min) / (max - min), 0, 1);
+  const startAngle = -135;
+  const endAngle = 135;
+  const angle = startAngle + t * (endAngle - startAngle);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    dragStartRef.current = { y: e.clientY, v: value };
+  };
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (!dragStartRef.current) return;
+    const dy = dragStartRef.current.y - e.clientY; // up = increase
+    const SENS = 0.005; // value range / pixel of drag
+    const range = max - min;
+    const next = clamp(dragStartRef.current.v + dy * range * SENS, min, max);
+    onChange(next);
+  };
+  const onPointerUp = (e: React.PointerEvent) => {
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    dragStartRef.current = null;
+  };
+
+  // SVG-arc path from startAngle to angle.
+  const SIZE = 50;
+  const RADIUS = 22;
+  const cx = SIZE / 2;
+  const cy = SIZE / 2;
+  const toXY = (a: number) => {
+    const r = (a - 90) * (Math.PI / 180);
+    return [cx + RADIUS * Math.cos(r), cy + RADIUS * Math.sin(r)];
+  };
+  const [sx, sy] = toXY(startAngle);
+  const [ex, ey] = toXY(angle);
+  const [tx, ty] = toXY(endAngle);
+  const largeArcBg = endAngle - startAngle > 180 ? 1 : 0;
+  const largeArcFg = angle - startAngle > 180 ? 1 : 0;
+  const arcBg = `M ${sx.toFixed(2)} ${sy.toFixed(2)} A ${RADIUS} ${RADIUS} 0 ${largeArcBg} 1 ${tx.toFixed(2)} ${ty.toFixed(2)}`;
+  const arcFg = `M ${sx.toFixed(2)} ${sy.toFixed(2)} A ${RADIUS} ${RADIUS} 0 ${largeArcFg} 1 ${ex.toFixed(2)} ${ey.toFixed(2)}`;
+
+  // Indicator tick from center toward the angle.
+  const [tickX, tickY] = toXY(angle);
+  const tickInner = (() => {
+    const r = (angle - 90) * (Math.PI / 180);
+    return [cx + (RADIUS - 8) * Math.cos(r), cy + (RADIUS - 8) * Math.sin(r)];
+  })();
+
+  return (
+    <div className="flex flex-col items-center gap-1 select-none">
+      <div
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+        style={{
+          width: SIZE,
+          height: SIZE,
+          cursor: 'ns-resize',
+          touchAction: 'none',
+          borderRadius: '50%',
+          background: 'radial-gradient(circle at 50% 35%, #2c1f54 0%, #14102b 80%)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -2px 4px rgba(0,0,0,0.3), 0 0 12px rgba(168,85,247,0.18)',
+          border: '1px solid rgba(168, 134, 255, 0.20)',
+        }}
+      >
+        <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} style={{ display: 'block' }}>
+          <path d={arcBg} stroke="rgba(255,255,255,0.08)" strokeWidth={2.5} fill="none" strokeLinecap="round" />
+          <path d={arcFg} stroke={ACCENT} strokeWidth={2.5} fill="none" strokeLinecap="round" style={{ filter: `drop-shadow(0 0 3px ${ACCENT})` }} />
+          <line
+            x1={tickInner[0]} y1={tickInner[1]}
+            x2={tickX} y2={tickY}
+            stroke="#ffffff"
+            strokeWidth={2}
+            strokeLinecap="round"
+          />
+        </svg>
+      </div>
+      <span className="text-[10.5px] font-semibold tabular-nums text-white/85">{label}</span>
+    </div>
+  );
+}

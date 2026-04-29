@@ -2,6 +2,7 @@ import { Reorder, useDragControls } from 'framer-motion';
 import { useEffectsStore, EFFECT_HUE, EFFECT_LABEL, type Effect } from '../../stores/effectsStore';
 import { EffectIcon } from '../layout/EffectsSection';
 import ChannelEqPanel from './ChannelEqPanel';
+import CompressorPanel from './CompressorPanel';
 
 // Per-track FX chain editor. Sits above the per-clip controls in
 // SampleEditorPanel whenever the selected track has at least one effect.
@@ -45,6 +46,17 @@ export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
               // header's pointer-down via ChannelEqPanel's prop.
               return (
                 <EqChainItem
+                  key={fx.id}
+                  fx={fx}
+                  laneKey={laneKey}
+                  isLast={isLast}
+                  onClose={() => remove(laneKey, fx.id)}
+                />
+              );
+            }
+            if (fx.kind === 'comp') {
+              return (
+                <CompChainItem
                   key={fx.id}
                   fx={fx}
                   laneKey={laneKey}
@@ -102,6 +114,39 @@ function EqChainItem({ fx, laneKey, isLast, onClose }: {
             // SyntheticEvent wrapper.
             dragControls.start(e.nativeEvent ?? e);
           }}
+        />
+        {!isLast && (
+          <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>
+        )}
+      </div>
+    </Reorder.Item>
+  );
+}
+
+// Same drag-handle pattern as EqChainItem — header grip is the only
+// reorder trigger so curve / knob drags inside the body stay free.
+function CompChainItem({ fx, laneKey, isLast, onClose }: {
+  fx: Effect;
+  laneKey: string;
+  isLast: boolean;
+  onClose: () => void;
+}) {
+  const dragControls = useDragControls();
+  return (
+    <Reorder.Item
+      value={fx.id}
+      dragListener={false}
+      dragControls={dragControls}
+      style={{ listStyle: 'none' }}
+      whileDrag={{ scale: 1.02, zIndex: 30, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
+      className="shrink-0"
+    >
+      <div className="flex items-stretch gap-1">
+        <CompressorPanel
+          laneKey={laneKey}
+          effect={fx}
+          onClose={onClose}
+          onHeaderPointerDown={(e) => dragControls.start(e.nativeEvent ?? e)}
         />
         {!isLast && (
           <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>
