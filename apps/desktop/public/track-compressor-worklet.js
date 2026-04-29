@@ -47,6 +47,12 @@ class TrackCompressorProcessor extends AudioWorkletProcessor {
     // Current gain reduction envelope (dB, always ≤ 0). Starts at 0
     // so the first sample passes through clean.
     this.envelope = 0;
+    // Block counter for throttled postMessage of the envelope back to
+    // the main thread (drives the per-track GR meter). Posting every
+    // block (128 samples = ~2.7 ms) is overkill; once every 5 blocks
+    // (~13 ms / ~75 Hz) is plenty for a smooth meter.
+    this._publishEvery = 5;
+    this._blocksSincePublish = 0;
   }
 
   process(inputs, outputs, parameters) {
@@ -79,6 +85,11 @@ class TrackCompressorProcessor extends AudioWorkletProcessor {
       // Decay envelope toward 0 so when ratio bumps above 1 again the
       // first block doesn't start with a stale gain-reduction value.
       this.envelope *= 0.99;
+      this._blocksSincePublish++;
+      if (this._blocksSincePublish >= this._publishEvery) {
+        this._blocksSincePublish = 0;
+        this.port.postMessage({ type: 'gr', envelopeDb: this.envelope });
+      }
       return true;
     }
 
@@ -120,6 +131,15 @@ class TrackCompressorProcessor extends AudioWorkletProcessor {
       for (let ch = 0; ch < channels; ch++) {
         output[ch][i] = input[ch][i] * linearGain;
       }
+    }
+
+    // Periodically publish the gain-reduction envelope so the UI's GR
+    // meter can render. dB is always ≤ 0; the meter inverts it for
+    // "how much we're squashing" in dB.
+    this._blocksSincePublish++;
+    if (this._blocksSincePublish >= this._publishEvery) {
+      this._blocksSincePublish = 0;
+      this.port.postMessage({ type: 'gr', envelopeDb: this.envelope });
     }
 
     return true;

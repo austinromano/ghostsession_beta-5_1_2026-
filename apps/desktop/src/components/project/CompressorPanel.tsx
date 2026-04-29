@@ -5,7 +5,11 @@ import {
   type CompParams,
   type Effect,
 } from '../../stores/effectsStore';
-import { getLaneCompAnalyser } from '../../stores/audio/trackComp';
+import {
+  getLaneCompAnalyser,
+  getLaneCompOutputAnalyser,
+  getLaneCompEnvelope,
+} from '../../stores/audio/trackComp';
 
 // Compressor panel — visual-first. Mirrors the user-supplied design:
 //
@@ -265,12 +269,16 @@ export default function CompressorPanel({
         )}
       </div>
 
-      {/* Body: meter + curve + readouts */}
+      {/* Body: 3-meter cluster + curve + readouts */}
       <div className="flex gap-2 px-3 pt-2">
-        {/* Meter column — live input level from the comp's analyser tap. */}
-        <div className="flex flex-col items-center gap-1 shrink-0" style={{ width: 28 }}>
-          <span className="text-[9px] font-semibold text-white/55 uppercase tracking-wider">In</span>
-          <LiveMeter laneKey={laneKey} />
+        {/* IN | GR | OUT — IN reads pre-comp, GR shows the live gain
+            reduction the worklet is applying (top-down bar), OUT
+            reads post-comp + makeup. Together they tell the full
+            "how is the compressor working right now" story. */}
+        <div className="flex items-end gap-1 shrink-0">
+          <MeterColumn label="In" type="level" laneKey={laneKey} which="input" />
+          <MeterColumn label="GR" type="reduction" laneKey={laneKey} which="gr" />
+          <MeterColumn label="Out" type="level" laneKey={laneKey} which="output" />
         </div>
 
         {/* Transfer-curve graph */}
@@ -362,10 +370,11 @@ export default function CompressorPanel({
         </div>
       </div>
 
-      {/* Knob row */}
+      {/* Knob row — Attack / Release / Makeup. Drag vertically. */}
       <div className="flex items-center justify-around px-3 pt-2 pb-3 mt-1">
         <Knob
           label={formatMs(attack)}
+          caption="Attack"
           value={attack}
           min={ATTACK_MIN}
           max={ATTACK_MAX}
@@ -373,10 +382,19 @@ export default function CompressorPanel({
         />
         <Knob
           label={formatMs(release)}
+          caption="Release"
           value={release}
           min={RELEASE_MIN}
           max={RELEASE_MAX}
           onChange={(v) => setCompParam(laneKey, effect.id, 'release', v)}
+        />
+        <Knob
+          label={formatGain(makeup)}
+          caption="Makeup"
+          value={makeup}
+          min={-20}
+          max={20}
+          onChange={(v) => setCompParam(laneKey, effect.id, 'makeup', v)}
         />
       </div>
     </div>
@@ -392,12 +410,23 @@ function ReadoutRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-// Live input meter — reads time-domain samples from the comp's
-// analyser tap each animation frame and lights up the corresponding
-// number of segments (green low, yellow mid, red top). Falls back to
-// a fully-dark column when no analyser is registered (track hasn't
-// been played yet).
-function LiveMeter({ laneKey }: { laneKey: string }) {
+// Three-mode meter column. type='level' fills BOTTOM-UP from the
+// analyser's RMS (with peak-decay), gradient green→yellow→red.
+// type='reduction' fills TOP-DOWN from the worklet's reported gain-
+// reduction envelope (always negative dB), violet, so the user sees
+// the comp pulling the signal down. Both share the same column shape
+// so the IN / GR / OUT triplet reads as a unified strip.
+function MeterColumn({
+  label,
+  type,
+  laneKey,
+  which,
+}: {
+  label: string;
+  type: 'level' | 'reduction';
+  laneKey: string;
+  which: 'input' | 'output' | 'gr';
+}) {
   const SEGMENTS = 14;
   const segRefs = useRef<Array<HTMLDivElement | null>>([]);
   const peakRef = useRef<number>(0);
@@ -407,54 +436,80 @@ function LiveMeter({ laneKey }: { laneKey: string }) {
     let buf: Float32Array | null = null;
     const tick = () => {
       raf = requestAnimationFrame(tick);
-      const a = getLaneCompAnalyser(laneKey);
-      let level = 0;
-      if (a) {
-        const bins = a.fftSize;
-        if (!buf || buf.length !== bins) buf = new Float32Array(bins);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        a.getFloatTimeDomainData(buf as any);
-        // RMS across the captured block — perceptually closer to a
-        // VU meter than peak. Cheap enough at 1024 samples per frame.
-        let sum = 0;
-        for (let i = 0; i < bins; i++) sum += buf[i] * buf[i];
-        const rms = Math.sqrt(sum / bins);
-        level = rms;
+      let lit = 0;
+      let topDown = false;
+      let hueFor = (i: number) => 120 - (i / (SEGMENTS - 1)) * 120;
+      if (type === 'level') {
+        const analyser = which === 'output'
+          ? getLaneCompOutputAnalyser(laneKey)
+          : getLaneCompAnalyser(laneKey);
+        let level = 0;
+        if (analyser) {
+          const bins = analyser.fftSize;
+          if (!buf || buf.length !== bins) buf = new Float32Array(bins);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          analyser.getFloatTimeDomainData(buf as any);
+          let sum = 0;
+          for (let i = 0; i < bins; i++) sum += buf[i] * buf[i];
+          level = Math.sqrt(sum / bins);
+        }
+        const decay = 0.92;
+        peakRef.current = Math.max(level, peakRef.current * decay);
+        const dB = peakRef.current > 1e-5 ? 20 * Math.log10(peakRef.current) : -60;
+        const t = clamp((dB + 60) / 60, 0, 1);
+        lit = Math.round(t * SEGMENTS);
+      } else {
+        // GR meter — invert envelope so larger reduction = taller bar.
+        // Map 0..-30 dB onto the SEGMENTS range. Top-down fill (the
+        // first segment lit is the topmost one).
+        topDown = true;
+        const env = getLaneCompEnvelope(laneKey); // ≤ 0
+        const reduction = -env; // 0..30+ dB of reduction
+        // Smooth slightly so jittery worklet posts don't make the
+        // meter strobe.
+        peakRef.current = Math.max(reduction, peakRef.current * 0.85);
+        const t = clamp(peakRef.current / 30, 0, 1);
+        lit = Math.round(t * SEGMENTS);
+        // Solid violet for GR — bypass the green/yellow/red ladder
+        // since reduction isn't a "danger" axis.
+        hueFor = () => 270;
       }
-      // Peak-decay envelope so the meter doesn't strobe on transients.
-      const decay = 0.92;
-      peakRef.current = Math.max(level, peakRef.current * decay);
-      // Map level (0..1, with practical headroom) to lit segments.
-      // 0 dBFS = 1.0, -60 dBFS = 0.001.
-      const dB = peakRef.current > 1e-5 ? 20 * Math.log10(peakRef.current) : -60;
-      const t = clamp((dB + 60) / 60, 0, 1); // -60..0 dB -> 0..1
-      const lit = Math.round(t * SEGMENTS);
       for (let i = 0; i < SEGMENTS; i++) {
         const el = segRefs.current[i];
         if (!el) continue;
-        const isLit = i < lit;
-        // Bottom (i=0) green, middle yellow, top (i=SEGMENTS-1) red.
-        const hue = 120 - (i / (SEGMENTS - 1)) * 120;
-        el.style.background = isLit ? `hsl(${hue}, 85%, 55%)` : 'rgba(255,255,255,0.04)';
-        el.style.boxShadow = isLit ? `0 0 4px hsl(${hue}, 85%, 55%)` : 'none';
+        // For top-down fill, lit segments are the TOP `lit` ones.
+        // For bottom-up, lit segments are the BOTTOM `lit` ones.
+        const isLit = topDown
+          ? i >= SEGMENTS - lit
+          : i < lit;
+        const hue = hueFor(i);
+        el.style.background = isLit
+          ? (type === 'reduction' ? '#a855f7' : `hsl(${hue}, 85%, 55%)`)
+          : 'rgba(255,255,255,0.04)';
+        el.style.boxShadow = isLit
+          ? (type === 'reduction' ? '0 0 4px rgba(168,85,247,0.7)' : `0 0 4px hsl(${hue}, 85%, 55%)`)
+          : 'none';
       }
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [laneKey]);
+  }, [laneKey, type, which]);
 
   return (
-    <div
-      className="rounded-sm overflow-hidden flex flex-col-reverse items-stretch gap-[1px] py-[1px] px-[1px]"
-      style={{ width: 12, height: 110, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
-    >
-      {Array.from({ length: SEGMENTS }, (_, i) => (
-        <div
-          key={i}
-          ref={(el) => { segRefs.current[i] = el; }}
-          style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 1, transition: 'box-shadow 80ms linear' }}
-        />
-      ))}
+    <div className="flex flex-col items-center gap-1 shrink-0" style={{ width: 22 }}>
+      <span className="text-[8.5px] font-semibold text-white/55 uppercase tracking-wider">{label}</span>
+      <div
+        className="rounded-sm overflow-hidden flex flex-col-reverse items-stretch gap-[1px] py-[1px] px-[1px]"
+        style={{ width: 10, height: 110, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
+      >
+        {Array.from({ length: SEGMENTS }, (_, i) => (
+          <div
+            key={i}
+            ref={(el) => { segRefs.current[i] = el; }}
+            style={{ flex: 1, background: 'rgba(255,255,255,0.04)', borderRadius: 1, transition: 'box-shadow 80ms linear' }}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -462,7 +517,7 @@ function LiveMeter({ laneKey }: { laneKey: string }) {
 // Round purple knob — drag vertically to change the value. Used for
 // Attack and Release. Visual style: outer ring with a value-arc inside,
 // label below.
-function Knob({ label, value, min, max, onChange }: { label: string; value: number; min: number; max: number; onChange: (v: number) => void }) {
+function Knob({ label, caption, value, min, max, onChange }: { label: string; caption?: string; value: number; min: number; max: number; onChange: (v: number) => void }) {
   const dragStartRef = useRef<{ y: number; v: number } | null>(null);
 
   // Map value → arc end angle. -135° (bottom-left) to +135° (bottom-right).
@@ -545,6 +600,7 @@ function Knob({ label, value, min, max, onChange }: { label: string; value: numb
         </svg>
       </div>
       <span className="text-[10.5px] font-semibold tabular-nums text-white/85">{label}</span>
+      {caption && <span className="text-[8.5px] uppercase tracking-wider text-white/45 -mt-0.5">{caption}</span>}
     </div>
   );
 }

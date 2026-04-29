@@ -17,8 +17,12 @@ interface TrackCompEntry {
   laneKey: string;
   node: AudioWorkletNode;
   analyser: AnalyserNode;       // tapped at INPUT — what's going INTO the comp
+  outputAnalyser: AnalyserNode; // tapped at OUTPUT — what comes OUT
   bypassed: boolean;
   storedRatio: number;          // last unbypassed ratio for restore
+  // Latest gain-reduction envelope value posted by the worklet
+  // (dB, always ≤ 0). The CompressorPanel's GR meter polls this.
+  envelopeDb: number;
 }
 
 const registry = new Map<string /* trackId */, TrackCompEntry>();
@@ -59,6 +63,10 @@ export function buildTrackCompChain(
   analyser.fftSize = 1024;
   analyser.smoothingTimeConstant = 0.4;
 
+  const outputAnalyser = ctx.createAnalyser();
+  outputAnalyser.fftSize = 1024;
+  outputAnalyser.smoothingTimeConstant = 0.4;
+
   const node = new AudioWorkletNode(ctx, 'track-compressor', {
     numberOfInputs: 1,
     numberOfOutputs: 1,
@@ -75,11 +83,24 @@ export function buildTrackCompChain(
   setParam(node, 'release', clamp(params.release, 10, 1000) / 1000);
   setParam(node, 'makeup', clamp(params.makeup, -20, 20));
 
-  // Wire: analyser → worklet
+  // Wire: analyser(in) → worklet → outputAnalyser
   analyser.connect(node);
+  node.connect(outputAnalyser);
 
-  registry.set(trackId, { laneKey, node, analyser, bypassed, storedRatio: ratioClamped });
-  return { input: analyser, output: node };
+  const entry: TrackCompEntry = { laneKey, node, analyser, outputAnalyser, bypassed, storedRatio: ratioClamped, envelopeDb: 0 };
+  // Listen for periodic gain-reduction posts from the worklet.
+  // ~75 Hz updates feed the GR meter. Only this entry's GR is updated
+  // — every clip in the lane has its own worklet, but for visualizer
+  // purposes we just read from the first one (getLaneCompEnvelope).
+  node.port.onmessage = (e: MessageEvent) => {
+    const data = e.data as { type?: string; envelopeDb?: number } | undefined;
+    if (data && data.type === 'gr' && typeof data.envelopeDb === 'number') {
+      entry.envelopeDb = data.envelopeDb;
+    }
+  };
+
+  registry.set(trackId, entry);
+  return { input: analyser, output: outputAnalyser };
 }
 
 /**
@@ -134,7 +155,7 @@ export function setLaneCompBypass(laneKey: string, bypassed: boolean, ctx?: Audi
 }
 
 /** Look up the input analyser for the lane's comp. Drives the
- * CompressorPanel level meter. */
+ * CompressorPanel input level meter. */
 export function getLaneCompAnalyser(laneKey: string): AnalyserNode | null {
   for (const entry of registry.values()) {
     if (entry.laneKey === laneKey) return entry.analyser;
@@ -142,18 +163,40 @@ export function getLaneCompAnalyser(laneKey: string): AnalyserNode | null {
   return null;
 }
 
+/** Output analyser — drives the OUT meter showing post-comp signal. */
+export function getLaneCompOutputAnalyser(laneKey: string): AnalyserNode | null {
+  for (const entry of registry.values()) {
+    if (entry.laneKey === laneKey) return entry.outputAnalyser;
+  }
+  return null;
+}
+
+/** Latest gain-reduction envelope (dB, ≤ 0) posted by the worklet.
+ * Drives the GR meter — invert so larger reduction reads as a taller
+ * meter. Returns 0 when no chain is registered. */
+export function getLaneCompEnvelope(laneKey: string): number {
+  for (const entry of registry.values()) {
+    if (entry.laneKey === laneKey) return entry.envelopeDb;
+  }
+  return 0;
+}
+
 export function removeTrackComp(trackId: string): void {
   const entry = registry.get(trackId);
   if (!entry) return;
+  try { entry.node.port.onmessage = null; } catch { /* ignore */ }
   try { entry.analyser.disconnect(); } catch { /* ignore */ }
   try { entry.node.disconnect(); } catch { /* ignore */ }
+  try { entry.outputAnalyser.disconnect(); } catch { /* ignore */ }
   registry.delete(trackId);
 }
 
 export function disposeAllTrackComp(): void {
   registry.forEach((entry) => {
+    try { entry.node.port.onmessage = null; } catch { /* ignore */ }
     try { entry.analyser.disconnect(); } catch { /* ignore */ }
     try { entry.node.disconnect(); } catch { /* ignore */ }
+    try { entry.outputAnalyser.disconnect(); } catch { /* ignore */ }
   });
   registry.clear();
 }
