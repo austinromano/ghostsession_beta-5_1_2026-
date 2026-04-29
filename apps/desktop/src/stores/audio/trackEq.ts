@@ -23,6 +23,10 @@ interface TrackEqEntry {
   filters: BiquadFilterNode[];   // exactly 4
   storedGains: number[];         // exactly 4 — last unbypassed gain per band
   bypassed: boolean;
+  // Analyser sits at the head of the chain so the visualizer can read
+  // the signal entering the EQ. AnalyserNode is spec'd as transparent,
+  // so its presence in series doesn't colour the audio.
+  analyser: AnalyserNode;
 }
 
 const registry = new Map<string /* trackId */, TrackEqEntry>();
@@ -71,9 +75,33 @@ export function buildTrackEqChain(
     filters[i].connect(filters[i + 1]);
   }
 
-  registry.set(trackId, { laneKey, filters, storedGains, bypassed });
+  // Visualizer tap: AnalyserNode at the head of the chain. The audio
+  // store wires source → gain → pan → eqInput, so this analyser sees
+  // exactly what enters the EQ. fftSize 2048 gives ~22 Hz resolution
+  // at 48 kHz which is plenty for a log-frequency spectrum render.
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.75;
+  analyser.minDecibels = -90;
+  analyser.maxDecibels = -10;
+  analyser.connect(filters[0]);
 
-  return { input: filters[0], output: filters[filters.length - 1] };
+  registry.set(trackId, { laneKey, filters, storedGains, bypassed, analyser });
+
+  return { input: analyser, output: filters[filters.length - 1] };
+}
+
+/**
+ * Pick the first analyser belonging to a given lane. Used by the
+ * Channel EQ panel to drive its visualizer. Returns null when no
+ * clip in the lane has been registered yet (i.e. before playback
+ * has started for the first time after adding the EQ).
+ */
+export function getLaneAnalyser(laneKey: string): AnalyserNode | null {
+  for (const entry of registry.values()) {
+    if (entry.laneKey === laneKey) return entry.analyser;
+  }
+  return null;
 }
 
 /**
@@ -137,6 +165,7 @@ export function setLaneEqBypass(laneKey: string, bypassed: boolean, ctx?: AudioC
 export function removeTrackEq(trackId: string): void {
   const entry = registry.get(trackId);
   if (!entry) return;
+  try { entry.analyser.disconnect(); } catch { /* ignore */ }
   for (const f of entry.filters) {
     try { f.disconnect(); } catch { /* ignore */ }
   }
@@ -147,6 +176,7 @@ export function removeTrackEq(trackId: string): void {
  * doesn't carry orphan filters into the next session. */
 export function disposeAllTrackEq(): void {
   registry.forEach((entry) => {
+    try { entry.analyser.disconnect(); } catch { /* ignore */ }
     for (const f of entry.filters) {
       try { f.disconnect(); } catch { /* ignore */ }
     }

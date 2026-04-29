@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import {
   EQ_BAND_LABELS,
   defaultParams,
@@ -6,6 +6,7 @@ import {
   type EqParams,
   type Effect,
 } from '../../stores/effectsStore';
+import { getLaneAnalyser } from '../../stores/audio/trackEq';
 
 // 4-band parametric EQ panel. Drag any of the four nodes to reshape the
 // curve; the readouts at the bottom mirror live freq + gain values.
@@ -101,6 +102,75 @@ export default function ChannelEqPanel({
   const bands = params.bands;
   const svgRef = useRef<SVGSVGElement | null>(null);
   const dragRef = useRef<number | null>(null);
+  // Refs for the spectrum paths so the rAF loop can write `d`
+  // attributes directly without triggering React re-renders. Drawing
+  // 60 fps via setState would re-render the whole panel each frame.
+  const spectrumFillRef = useRef<SVGPathElement | null>(null);
+  const spectrumLineRef = useRef<SVGPathElement | null>(null);
+
+  // Live spectrum visualizer. Tapped at the head of the EQ chain, so
+  // the curve shows what's flowing INTO the EQ (pre-band-shaping).
+  // The analyser only exists once playback has started and the per-
+  // clip chain has been built — until then we draw a flat baseline.
+  useEffect(() => {
+    let raf = 0;
+    let buf: Uint8Array | null = null;
+    const STEPS = 120;
+    const yBottom = PLOT_Y + PLOT_H;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const fillEl = spectrumFillRef.current;
+      const lineEl = spectrumLineRef.current;
+      if (!fillEl || !lineEl) return;
+      const analyser = getLaneAnalyser(laneKey);
+      if (!analyser) {
+        // No chain yet — flatten the spectrum to the baseline so the
+        // panel doesn't show stale data from a previous lane.
+        fillEl.setAttribute('d', '');
+        lineEl.setAttribute('d', '');
+        return;
+      }
+      const bins = analyser.frequencyBinCount;
+      if (!buf || buf.length !== bins) buf = new Uint8Array(bins);
+      // Newer TS lib types narrow the parameter to Uint8Array<ArrayBuffer>;
+      // our buf carries the wider ArrayBufferLike at the type level.
+      // The runtime contract is identical, so cast at the call site.
+      analyser.getByteFrequencyData(buf as unknown as Uint8Array<ArrayBuffer>);
+      const sampleRate = analyser.context.sampleRate;
+      const nyquist = sampleRate / 2;
+
+      // Build a smoothed log-frequency path. For each step, average
+      // the bins falling inside the corresponding log-frequency band
+      // so isolated FFT spikes don't create visual jitter.
+      const linePts: string[] = [];
+      let prevLogF = LOG_MIN;
+      for (let i = 0; i <= STEPS; i++) {
+        const t = i / STEPS;
+        const logF = LOG_MIN + t * (LOG_MAX - LOG_MIN);
+        const fLo = Math.pow(10, prevLogF);
+        const fHi = Math.pow(10, logF);
+        const binLo = Math.max(0, Math.floor((fLo / nyquist) * bins));
+        const binHi = Math.min(bins - 1, Math.ceil((fHi / nyquist) * bins));
+        let acc = 0, count = 0;
+        for (let b = binLo; b <= binHi; b++) { acc += buf[b]; count++; }
+        const v = count > 0 ? (acc / count) / 255 : 0; // 0..1
+        const x = PLOT_X + t * PLOT_W;
+        // Map amplitude to graph height. v=1 fills the full plot,
+        // v=0 sits at the bottom. Apply a small gamma so quiet signal
+        // doesn't disappear into the floor.
+        const gamma = Math.pow(v, 0.7);
+        const y = yBottom - gamma * PLOT_H;
+        linePts.push(`${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`);
+        prevLogF = logF;
+      }
+      const linePath = linePts.join(' ');
+      const fillPathSpectrum = `${linePath} L ${PLOT_X + PLOT_W} ${yBottom} L ${PLOT_X} ${yBottom} Z`;
+      lineEl.setAttribute('d', linePath);
+      fillEl.setAttribute('d', fillPathSpectrum);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [laneKey]);
 
   // Generate the response curve as 120 sample points across the
   // visible log-frequency range. Recomputed on every render — cheap,
@@ -266,6 +336,19 @@ export default function ChannelEqPanel({
               <stop offset="100%" stopColor="#6d28d9" />
             </radialGradient>
           </defs>
+
+          {/* Live input spectrum — tapped at the EQ chain head. Drawn
+              FIRST so the response curve fill / line render on top.
+              Path `d` is updated per-frame via ref to avoid React
+              re-renders. */}
+          <path ref={spectrumFillRef} fill="rgba(120, 90, 200, 0.18)" />
+          <path
+            ref={spectrumLineRef}
+            fill="none"
+            stroke="rgba(180, 150, 240, 0.55)"
+            strokeWidth={1}
+            strokeLinejoin="round"
+          />
 
           {/* Faint vertical grid (octaves: 50, 100, 200, 500, 1k, 2k, 5k, 10k) */}
           {[50, 100, 200, 500, 1000, 2000, 5000, 10000].map((f) => (
