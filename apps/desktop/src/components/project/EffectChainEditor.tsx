@@ -94,7 +94,14 @@ function EqChainItem({ fx, laneKey, isLast, onClose }: {
           laneKey={laneKey}
           effect={fx}
           onClose={onClose}
-          onHeaderPointerDown={(e) => dragControls.start(e)}
+          onHeaderPointerDown={(e) => {
+            // Hand the active pointer event to framer's drag controller
+            // so reorder picks up from this gesture. The native event
+            // is what framer's gesture recogniser actually inspects —
+            // pass it explicitly so older browsers don't trip on the
+            // SyntheticEvent wrapper.
+            dragControls.start(e.nativeEvent ?? e);
+          }}
         />
         {!isLast && (
           <span className="shrink-0 self-center text-[14px] font-bold text-white/30 px-0.5 select-none">→</span>

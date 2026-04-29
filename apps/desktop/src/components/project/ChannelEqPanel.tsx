@@ -178,24 +178,32 @@ export default function ChannelEqPanel({
         transition: 'opacity 120ms linear',
       }}
     >
-      {/* Header — also acts as the drag handle for the outer
-          Reorder.Item when the parent supplies onHeaderPointerDown. */}
+      {/* Header — only the small grip icon at the start is the drag
+          handle. Everything else (title, bypass, close) is passive so
+          band-node drags below stay clean. */}
       <div
         className="flex items-center gap-2 px-3 py-2 border-b"
-        style={{
-          borderColor: 'rgba(255,255,255,0.05)',
-          cursor: onHeaderPointerDown ? 'grab' : 'default',
-          userSelect: 'none',
-        }}
-        onPointerDown={(e) => {
-          // Only escalate to reorder if the press lands on the strip
-          // itself, not on a button (bypass / close). Buttons have
-          // their own onPointerDown that stop propagation.
-          if (!onHeaderPointerDown) return;
-          if (e.button !== 0) return;
-          onHeaderPointerDown(e);
-        }}
+        style={{ borderColor: 'rgba(255,255,255,0.05)', userSelect: 'none' }}
       >
+        {onHeaderPointerDown && (
+          <button
+            type="button"
+            aria-label="Drag to reorder"
+            title="Drag to reorder"
+            className="shrink-0 -ml-1 flex items-center justify-center w-5 h-5 rounded text-white/40 hover:text-white/85 transition-colors"
+            style={{ cursor: 'grab', touchAction: 'none' }}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              onHeaderPointerDown(e);
+            }}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+              <circle cx="9" cy="5" r="1.6" /><circle cx="9" cy="12" r="1.6" /><circle cx="9" cy="19" r="1.6" />
+              <circle cx="15" cy="5" r="1.6" /><circle cx="15" cy="12" r="1.6" /><circle cx="15" cy="19" r="1.6" />
+            </svg>
+          </button>
+        )}
         <span
           className="w-3 h-3 rotate-45"
           style={{
