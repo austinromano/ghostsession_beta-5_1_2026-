@@ -83,10 +83,12 @@ export default function ChannelEqPanel({
   laneKey: string;
   effect: Effect;
   onClose?: () => void;
-  // Optional: when supplied, the header strip becomes a drag handle
-  // for an outer Reorder.Item. The panel itself never starts a drag —
-  // only this hook lets the parent escalate the gesture to a reorder.
-  onHeaderPointerDown?: (e: React.PointerEvent<HTMLDivElement>) => void;
+  // Optional: when supplied, the panel exposes a small grip icon in
+  // the header that, on pointer-down, hands the gesture to the parent
+  // Reorder.Item via this callback. Typed loosely (any element) so
+  // the consumer can fire it from a button, span, or div without
+  // TS friction.
+  onHeaderPointerDown?: (e: React.PointerEvent<HTMLElement>) => void;
 }) {
   const setEqBand = useEffectsStore((s) => s.setEqBand);
   const toggleBypass = useEffectsStore((s) => s.toggleBypass);
