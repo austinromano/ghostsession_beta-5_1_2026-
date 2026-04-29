@@ -1,4 +1,25 @@
 import { create } from 'zustand';
+import { setLaneEqBand, setLaneEqBypass } from './audio/trackEq';
+import { getCtx } from './audio/graph';
+
+// Resolve the live AudioContext for filter ramps. Wrapped in a
+// try/catch because getCtx() will eagerly init() the audio graph if
+// it hasn't been booted yet — and we shouldn't boot the audio engine
+// just because the user dragged an EQ band before any source loaded.
+function getCtxIfPresent(): AudioContext | undefined {
+  try { return getCtx(); } catch { return undefined; }
+}
+
+// Fires whenever a chain mutates in a way that requires re-routing the
+// audio graph (add or remove an effect). audioStore listens for this
+// and, if playing, seeks to the current position so startAllSources
+// rebuilds with the new chain shape. Sub-millisecond click is the
+// trade-off for hot add/remove.
+function fireRewire() {
+  try {
+    window.dispatchEvent(new CustomEvent('ghost-fx-rewire'));
+  } catch { /* SSR */ }
+}
 
 // Per-track effect chains. Visual-only first pass — chips render in the
 // sidebar, get dropped onto tracks, reorder / delete / bypass live in the
@@ -188,6 +209,7 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     next.set(pid, proj);
     set({ byProject: next });
     persistProject(pid, proj);
+    fireRewire();
   },
 
   remove: (trackId, effectId) => {
@@ -202,6 +224,7 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     next.set(pid, proj);
     set({ byProject: next });
     persistProject(pid, proj);
+    fireRewire();
   },
 
   toggleBypass: (trackId, effectId) => {
@@ -210,11 +233,22 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     const next = new Map(get().byProject);
     const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
     const existing = proj.get(trackId) ?? [];
-    const updated = existing.map((e) => (e.id === effectId ? { ...e, bypassed: !e.bypassed } : e));
+    let toggled: Effect | null = null;
+    const updated = existing.map((e) => {
+      if (e.id !== effectId) return e;
+      const flipped = { ...e, bypassed: !e.bypassed };
+      toggled = flipped;
+      return flipped;
+    });
     proj.set(trackId, updated);
     next.set(pid, proj);
     set({ byProject: next });
     persistProject(pid, proj);
+    // Push bypass to live filter params for every clip in the lane —
+    // smooth-ramps, no playback interruption.
+    if (toggled && (toggled as Effect).kind === 'eq') {
+      setLaneEqBypass(trackId, (toggled as Effect).bypassed, getCtxIfPresent());
+    }
   },
 
   reorder: (trackId, fromIndex, toIndex) => {
@@ -272,16 +306,26 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     const next = new Map(get().byProject);
     const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
     const existing = proj.get(trackId) ?? [];
+    let resolvedFreq = 0;
+    let resolvedGain = 0;
     const updated = existing.map((e) => {
       if (e.id !== effectId || e.kind !== 'eq') return e;
       const base = (e.params as EqParams | undefined) ?? (defaultParams('eq') as EqParams);
       const newBands = [...base.bands] as [EqBand, EqBand, EqBand, EqBand];
       newBands[bandIndex] = { ...newBands[bandIndex], ...patch };
+      resolvedFreq = newBands[bandIndex].freq;
+      resolvedGain = newBands[bandIndex].gain;
       return { ...e, params: { bands: newBands } };
     });
     proj.set(trackId, updated);
     next.set(pid, proj);
     set({ byProject: next });
     persistProject(pid, proj);
+    // Live-push the band update to every BiquadFilter clip in the
+    // lane. trackId here IS the laneKey (drop site stores the chain
+    // by laneKey), so trackEq registry entries match.
+    if (resolvedFreq > 0 || resolvedGain !== 0) {
+      setLaneEqBand(trackId, bandIndex, resolvedFreq, resolvedGain, getCtxIfPresent());
+    }
   },
 }));
