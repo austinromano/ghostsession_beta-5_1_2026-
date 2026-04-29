@@ -35,10 +35,13 @@ import {
 
 const PANEL_W = 304;
 
-// Transfer-curve graph dimensions.
-const GRAPH_VIEW_W = 170;
-const GRAPH_VIEW_H = 130;
-const GRAPH_PAD = 8;
+// Transfer-curve graph dimensions. Sized so the panel ends up at the
+// same overall height as ChannelEqPanel — graph is shorter than EQ's
+// because the comp adds a knob row underneath, while the EQ uses the
+// equivalent space for its band readouts.
+const GRAPH_VIEW_W = 150;
+const GRAPH_VIEW_H = 96;
+const GRAPH_PAD = 6;
 const GRAPH_PLOT_X = GRAPH_PAD;
 const GRAPH_PLOT_Y = GRAPH_PAD;
 const GRAPH_PLOT_W = GRAPH_VIEW_W - GRAPH_PAD * 2;
@@ -270,7 +273,7 @@ export default function CompressorPanel({
       </div>
 
       {/* Body: 3-meter cluster + curve + readouts */}
-      <div className="flex gap-2 px-3 pt-2">
+      <div className="flex gap-1.5 px-3 pt-1.5">
         {/* IN | GR | OUT — IN reads pre-comp, GR shows the live gain
             reduction the worklet is applying (top-down bar), OUT
             reads post-comp + makeup. Together they tell the full
@@ -360,8 +363,9 @@ export default function CompressorPanel({
           })()}
         </svg>
 
-        {/* Readouts column */}
-        <div className="flex flex-col gap-1.5 text-right grow shrink-0 pl-1">
+        {/* Readouts column — 5 rows packed into the same vertical
+            space as the graph/meters so the panel matches EQ height. */}
+        <div className="flex flex-col gap-0 text-right grow shrink-0 pl-1 justify-between" style={{ minHeight: GRAPH_VIEW_H }}>
           <ReadoutRow label="Threshold" value={formatThreshold(threshold)} />
           <ReadoutRow label="Ratio" value={formatRatio(ratio)} />
           <ReadoutRow label="Attack" value={formatMs(attack)} />
@@ -371,7 +375,7 @@ export default function CompressorPanel({
       </div>
 
       {/* Knob row — Attack / Release / Makeup. Drag vertically. */}
-      <div className="flex items-center justify-around px-3 pt-2 pb-3 mt-1">
+      <div className="flex items-center justify-around px-3 pt-1 pb-2">
         <Knob
           label={formatMs(attack)}
           caption="Attack"
@@ -403,9 +407,9 @@ export default function CompressorPanel({
 
 function ReadoutRow({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex flex-col items-end leading-tight">
-      <span className="text-[9.5px] uppercase tracking-wider text-white/50">{label}</span>
-      <span className="text-[12px] font-semibold tabular-nums text-white/90">{value}</span>
+    <div className="flex flex-col items-end" style={{ lineHeight: 1 }}>
+      <span className="text-[8.5px] uppercase tracking-wider text-white/50">{label}</span>
+      <span className="text-[11px] font-semibold tabular-nums text-white/90 mt-[2px]">{value}</span>
     </div>
   );
 }
@@ -496,11 +500,11 @@ function MeterColumn({
   }, [laneKey, type, which]);
 
   return (
-    <div className="flex flex-col items-center gap-1 shrink-0" style={{ width: 22 }}>
-      <span className="text-[8.5px] font-semibold text-white/55 uppercase tracking-wider">{label}</span>
+    <div className="flex flex-col items-center gap-0.5 shrink-0" style={{ width: 18 }}>
+      <span className="text-[8px] font-semibold text-white/55 uppercase tracking-wider">{label}</span>
       <div
         className="rounded-sm overflow-hidden flex flex-col-reverse items-stretch gap-[1px] py-[1px] px-[1px]"
-        style={{ width: 10, height: 110, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
+        style={{ width: 9, height: 80, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
       >
         {Array.from({ length: SEGMENTS }, (_, i) => (
           <div
@@ -545,9 +549,10 @@ function Knob({ label, caption, value, min, max, onChange }: { label: string; ca
     dragStartRef.current = null;
   };
 
-  // SVG-arc path from startAngle to angle.
-  const SIZE = 50;
-  const RADIUS = 22;
+  // SVG-arc path from startAngle to angle. Sized to match the EQ
+  // panel's overall height — bigger knobs would push the panel taller.
+  const SIZE = 38;
+  const RADIUS = 16;
   const cx = SIZE / 2;
   const cy = SIZE / 2;
   const toXY = (a: number) => {
@@ -570,7 +575,7 @@ function Knob({ label, caption, value, min, max, onChange }: { label: string; ca
   })();
 
   return (
-    <div className="flex flex-col items-center gap-1 select-none">
+    <div className="flex flex-col items-center gap-0.5 select-none">
       <div
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -583,24 +588,24 @@ function Knob({ label, caption, value, min, max, onChange }: { label: string; ca
           touchAction: 'none',
           borderRadius: '50%',
           background: 'radial-gradient(circle at 50% 35%, #2c1f54 0%, #14102b 80%)',
-          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -2px 4px rgba(0,0,0,0.3), 0 0 12px rgba(168,85,247,0.18)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.08), inset 0 -2px 4px rgba(0,0,0,0.3), 0 0 8px rgba(168,85,247,0.16)',
           border: '1px solid rgba(168, 134, 255, 0.20)',
         }}
       >
         <svg width={SIZE} height={SIZE} viewBox={`0 0 ${SIZE} ${SIZE}`} style={{ display: 'block' }}>
-          <path d={arcBg} stroke="rgba(255,255,255,0.08)" strokeWidth={2.5} fill="none" strokeLinecap="round" />
-          <path d={arcFg} stroke={ACCENT} strokeWidth={2.5} fill="none" strokeLinecap="round" style={{ filter: `drop-shadow(0 0 3px ${ACCENT})` }} />
+          <path d={arcBg} stroke="rgba(255,255,255,0.08)" strokeWidth={2} fill="none" strokeLinecap="round" />
+          <path d={arcFg} stroke={ACCENT} strokeWidth={2} fill="none" strokeLinecap="round" style={{ filter: `drop-shadow(0 0 2px ${ACCENT})` }} />
           <line
             x1={tickInner[0]} y1={tickInner[1]}
             x2={tickX} y2={tickY}
             stroke="#ffffff"
-            strokeWidth={2}
+            strokeWidth={1.6}
             strokeLinecap="round"
           />
         </svg>
       </div>
-      <span className="text-[10.5px] font-semibold tabular-nums text-white/85">{label}</span>
-      {caption && <span className="text-[8.5px] uppercase tracking-wider text-white/45 -mt-0.5">{caption}</span>}
+      <span className="text-[9.5px] font-semibold tabular-nums text-white/85 leading-none">{label}</span>
+      {caption && <span className="text-[7.5px] uppercase tracking-wider text-white/45 leading-none">{caption}</span>}
     </div>
   );
 }
