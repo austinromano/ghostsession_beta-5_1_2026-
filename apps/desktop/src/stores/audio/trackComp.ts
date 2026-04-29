@@ -1,4 +1,37 @@
 import type { CompParams } from '../effectsStore';
+import { ensureTrackCompressorWorklet } from './graph';
+
+// Worklet readiness tracking. The 'track-compressor' processor is
+// loaded async via ctx.audioWorklet.addModule(); if buildTrackCompChain
+// runs before that promise resolves, `new AudioWorkletNode` throws.
+//
+// We watch the readiness state so:
+//   1. The first build attempt that hits an unloaded worklet kicks off
+//      the load (no-op if already in flight).
+//   2. Once it resolves, we fire ghost-fx-rewire so audioStore rebuilds
+//      the chain — the comp that was skipped on the first pass slots
+//      in cleanly on the rebuild.
+let compWorkletReady = false;
+let compWorkletPending: Promise<void> | null = null;
+function ensureCompWorklet(): void {
+  if (compWorkletReady || compWorkletPending) return;
+  compWorkletPending = ensureTrackCompressorWorklet()
+    .then(() => {
+      compWorkletReady = true;
+      compWorkletPending = null;
+      // Tell the audio engine to re-build chains so any comp that was
+      // skipped on the first pass gets its DSP wired now.
+      try {
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('ghost-fx-rewire'));
+        }
+      } catch { /* SSR / restricted env */ }
+    })
+    .catch(() => {
+      compWorkletPending = null;
+      // leave compWorkletReady = false; future builds keep retrying
+    });
+}
 
 /**
  * Per-clip compressor DSP. Mirrors trackEq.ts's pattern: a registry
@@ -58,6 +91,14 @@ export function buildTrackCompChain(
   bypassed: boolean,
 ): { input: AudioNode; output: AudioNode } {
   removeTrackComp(trackId);
+
+  // If the worklet hasn't registered yet, throw and queue a rebuild —
+  // the chain walker catches this, audio passes through unprocessed
+  // for a moment, and we get a second pass once the module loads.
+  if (!compWorkletReady) {
+    ensureCompWorklet();
+    throw new Error('track-compressor worklet not yet registered');
+  }
 
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 1024;
@@ -200,3 +241,8 @@ export function disposeAllTrackComp(): void {
   });
   registry.clear();
 }
+
+// Pre-warm the worklet at module load. By the time the user has
+// scrolled through a project and dropped a comp on a track, the
+// addModule promise will have resolved.
+ensureCompWorklet();
