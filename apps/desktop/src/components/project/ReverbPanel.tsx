@@ -173,9 +173,12 @@ export default function ReverbPanel({
           </div>
         </div>
 
-        {/* Right column — Size / Decay / Width vertically stacked. */}
+        {/* Right column — Size / Decay / Width vertically stacked.
+            justify-center + gap-3 puts even space between each knob
+            group so the label/knob/value triplets read as cohesive
+            units instead of bleeding into each other. */}
         <div
-          className="flex flex-col items-center justify-around shrink-0 px-2 py-2 border-l"
+          className="flex flex-col items-center justify-center gap-3 shrink-0 px-2 py-2 border-l"
           style={{ width: 70, borderColor: 'rgba(255,255,255,0.05)' }}
         >
           <Knob
@@ -455,9 +458,13 @@ function Knob({ label, valueLabel, value, min, max, onChange, large = false, com
     return [cx + (RADIUS - 9) * Math.cos(r), cy + (RADIUS - 9) * Math.sin(r)];
   })();
 
+  // Tight internal stacking: label sits 2 px above the knob; value
+  // sits 4 px below it. The parent column controls the gap BETWEEN
+  // knobs so each knob reads as a cohesive label/knob/value group
+  // instead of three values floating between groups.
   return (
-    <div className="flex flex-col items-center gap-1 select-none">
-      {!large && <span className="text-[9.5px] uppercase tracking-wider text-white/55">{label}</span>}
+    <div className="flex flex-col items-center select-none">
+      {!large && <span className="text-[9.5px] uppercase tracking-wider text-white/55 leading-none mb-[3px]">{label}</span>}
       <div
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
@@ -480,8 +487,8 @@ function Knob({ label, valueLabel, value, min, max, onChange, large = false, com
           <line x1={tickInner[0]} y1={tickInner[1]} x2={tickX} y2={tickY} stroke="#ffffff" strokeWidth={2} strokeLinecap="round" />
         </svg>
       </div>
-      <span className="text-[12px] font-semibold tabular-nums text-white/90 leading-none mt-0.5">{valueLabel}</span>
-      {large && <span className="text-[9px] uppercase tracking-wider text-white/45 leading-none">{label}</span>}
+      <span className="text-[11.5px] font-semibold tabular-nums text-white/90 leading-none mt-1">{valueLabel}</span>
+      {large && <span className="text-[9px] uppercase tracking-wider text-white/45 leading-none mt-[2px]">{label}</span>}
     </div>
   );
 }
