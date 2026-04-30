@@ -192,7 +192,7 @@ function TrackHeader({ name, hue, isSelected, trackIds, laneKey, meter, controls
           <span className="text-[10px] font-semibold text-white/95 truncate flex-1" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
             {cleanName}
           </span>
-          <HeaderEffectChips laneKey={trackIds[0] ?? ''} />
+          <HeaderEffectChips laneKey={laneKey ?? trackIds[0] ?? ''} />
           <span
             className="shrink-0 w-1.5 h-1.5 rounded-full"
             style={{ background: accent, boxShadow: `0 0 4px ${accent}` }}
@@ -1657,12 +1657,11 @@ function LaneRow({ laneKey, laneTracks, laneHeight, selectedProjectId, deleteTra
     try {
       const raw = e.dataTransfer.getData(EFFECT_DRAG_MIME);
       const payload = JSON.parse(raw) as { kind: EffectKind };
-      // Effects are per-clip — keyed by the lane's primary trackId.
-      // Two tracks that happen to share a source file no longer
-      // accidentally share each other's effect chains.
-      const target = laneTracks[0]?.id;
-      if (!target || !payload?.kind) return;
-      useEffectsStore.getState().add(target, payload.kind);
+      // Effects are lane-scoped — every clip in the same lane shares
+      // one chain so an EQ on the "vocals" lane processes every
+      // vocal clip through it.
+      if (!laneKey || !payload?.kind) return;
+      useEffectsStore.getState().add(laneKey, payload.kind);
     } catch { /* malformed payload — ignore */ }
   };
 
