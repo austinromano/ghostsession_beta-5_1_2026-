@@ -1360,7 +1360,7 @@ function DrumRowLane({ row, rowIdx, rowHue, clips, arrangementDur, stepDur, subL
   row: { id: string; name: string; muted: boolean };
   rowIdx: number;
   rowHue: number;
-  clips: Array<{ id: string; startSec: number; lengthSec: number; patternSteps: number; steps: boolean[][] }>;
+  clips: Array<{ id: string; startSec: number; lengthSec: number; patternSteps: number; steps: number[][] }>;
   arrangementDur: number;
   stepDur: number;
   // 24 px = compact default; passed at full track-lane height when the
@@ -1420,7 +1420,7 @@ function DrumClipBlock({
   startSec: number;
   lengthSec: number;
   patternSteps: number;
-  steps: boolean[][];
+  steps: number[][];
   rowCount: number;
   arrangementDur: number;
   stepDur: number;

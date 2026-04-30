@@ -29,6 +29,7 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
   const setRowVolume = useDrumRack((s) => s.setRowVolume);
   const toggleRowMuted = useDrumRack((s) => s.toggleRowMuted);
   const toggleStep = useDrumRack((s) => s.toggleStep);
+  const setStepVelocity = useDrumRack((s) => s.setStepVelocity);
   const clearClip = useDrumRack((s) => s.clearClip);
   const setPatternSteps = useDrumRack((s) => s.setPatternSteps);
   const createClipAt = useDrumRack((s) => s.createClipAt);
@@ -249,6 +250,7 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
             currentStepIdx={currentStepIdx}
             onDrop={(source) => loadIntoRow(row.id, source)}
             onToggleStep={(idx) => selectedClip && toggleStep(selectedClip.id, rowIdx, idx)}
+            onSetStepVelocity={(idx, v) => selectedClip && setStepVelocity(selectedClip.id, rowIdx, idx, v)}
             onSetVolume={(v) => setRowVolume(row.id, v)}
             onToggleMuted={() => toggleRowMuted(row.id)}
             onRemove={() => removeRow(row.id)}
@@ -266,15 +268,16 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
 
 // ── Single row ───────────────────────────────────────────────────────────
 
-function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, onDrop, onToggleStep, onSetVolume, onToggleMuted, onRemove }: {
+function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, onDrop, onToggleStep, onSetStepVelocity, onSetVolume, onToggleMuted, onRemove }: {
   row: DrumRow;
   rowIdx: number;
   patternSteps: number;
-  steps: boolean[] | null;
+  steps: number[] | null;
   clipSelected: boolean;
   currentStepIdx: number;
   onDrop: (source: { kind: 'os'; file: File } | { kind: 'library'; id: string; name: string } | { kind: 'projectFile'; id: string; name: string }) => void;
   onToggleStep: (idx: number) => void;
+  onSetStepVelocity: (idx: number, velocity: number) => void;
   onSetVolume: (v: number) => void;
   onToggleMuted: () => void;
   onRemove: () => void;
@@ -361,40 +364,22 @@ function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, o
         title={`Volume ${Math.round(row.volume * 100)}%`}
       />
 
-      {/* Step grid (selected clip only) */}
+      {/* Step grid (selected clip only). Each cell is a click-to-toggle
+          + drag-up-or-down-to-set-velocity affordance with a vertical
+          fill that reflects the velocity from the bottom up. */}
       <div className="flex-1 flex items-center gap-[2px]">
-        {Array.from({ length: patternSteps }).map((_, i) => {
-          const on = !!steps?.[i];
-          const beatStart = i % 4 === 0;
-          const playing = i === currentStepIdx;
-          // "On" cells flash bright when the playhead crosses them.
-          // Empty cells get a soft column highlight so you can still see
-          // where the playhead is even on rows with no hits.
-          const bg = on
-            ? (playing ? 'hsl(165, 95%, 70%)' : 'hsl(165, 70%, 45%)')
-            : (playing
-                ? 'rgba(0, 255, 200, 0.18)'
-                : beatStart ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)');
-          const glow = on && playing
-            ? '0 0 14px hsla(165, 95%, 70%, 0.85), inset 0 1px 0 rgba(255,255,255,0.5)'
-            : on
-              ? 'inset 0 1px 0 rgba(255,255,255,0.25), inset 0 -1px 0 rgba(0,0,0,0.25)'
-              : undefined;
-          return (
-            <button
-              key={i}
-              onClick={() => clipSelected && onToggleStep(i)}
-              disabled={!clipSelected}
-              className="flex-1 h-6 rounded-sm transition-[background,box-shadow] duration-75 disabled:cursor-not-allowed"
-              style={{
-                background: bg,
-                boxShadow: glow,
-                opacity: clipSelected ? 1 : 0.4,
-              }}
-              title={clipSelected ? `Step ${i + 1}` : 'Select a clip first'}
-            />
-          );
-        })}
+        {Array.from({ length: patternSteps }).map((_, i) => (
+          <StepCell
+            key={i}
+            beatStart={i % 4 === 0}
+            playing={i === currentStepIdx}
+            velocity={steps?.[i] ?? 0}
+            disabled={!clipSelected}
+            onToggle={() => onToggleStep(i)}
+            onSetVelocity={(v) => onSetStepVelocity(i, v)}
+            label={`Step ${i + 1}`}
+          />
+        ))}
       </div>
 
       {/* Row controls */}
@@ -405,6 +390,137 @@ function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, o
       >
         ×
       </button>
+    </div>
+  );
+}
+
+// Single step cell. Behavior:
+//
+//   - Plain click (no movement) toggles the step on/off. Toggling on
+//     uses velocity 1.0 unless the cell already had a stored velocity
+//     (the store retains it so re-toggling restores prior value).
+//   - Pointer down + vertical drag (>3 px) enters drag mode and sets
+//     velocity to the dragged-to position (1.0 at the top of the cell,
+//     0 at the bottom). Drag commits with the pointer-up release; a
+//     drag never produces an additional toggle.
+//   - Visual: an inner vertical fill rises from the bottom of the cell
+//     to (velocity × cellHeight). When the playhead is on the cell the
+//     fill brightens; off-cells get a soft column glow so the playhead
+//     is still visible on empty rows.
+function StepCell({ beatStart, playing, velocity, disabled, onToggle, onSetVelocity, label }: {
+  beatStart: boolean;
+  playing: boolean;
+  velocity: number;
+  disabled: boolean;
+  onToggle: () => void;
+  onSetVelocity: (v: number) => void;
+  label: string;
+}) {
+  const elRef = useRef<HTMLDivElement>(null);
+  const dragStateRef = useRef<{
+    startY: number;
+    startV: number;
+    height: number;
+    moved: boolean;
+  } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled) return;
+    if (e.button !== 0) return;
+    const rect = elRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    dragStateRef.current = {
+      startY: e.clientY,
+      startV: velocity,
+      height: rect.height,
+      moved: false,
+    };
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragStateRef.current;
+    if (!st) return;
+    const dy = st.startY - e.clientY; // up = positive
+    if (!st.moved && Math.abs(dy) < 3) return;
+    st.moved = true;
+    // 1 cell of vertical drag = full 0..1 range. Start velocity is the
+    // current cell value; if the cell was off we treat it as starting
+    // from 0 so dragging up immediately turns it on at the dragged
+    // velocity. Sensitivity tuned so a single cell-height drag covers
+    // the full range — natural one-flick interaction.
+    const base = st.startV > 0 ? st.startV : 0;
+    const next = Math.max(0, Math.min(1, base + dy / st.height));
+    onSetVelocity(next);
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragStateRef.current;
+    dragStateRef.current = null;
+    if (!st) return;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    if (!st.moved) {
+      // Pure click — toggle. Drag-with-no-movement still counts as a
+      // click so the user can tap a cell on without entering drag mode.
+      onToggle();
+    }
+  };
+
+  const on = velocity > 0;
+  const fillColor = on
+    ? (playing ? 'hsl(165, 95%, 70%)' : 'hsl(165, 70%, 45%)')
+    : (playing ? 'rgba(0, 255, 200, 0.18)' : 'transparent');
+  const cellBg = beatStart ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.025)';
+  const fillPct = Math.max(0, Math.min(1, velocity)) * 100;
+  const glow = on && playing
+    ? '0 0 14px hsla(165, 95%, 70%, 0.85), inset 0 1px 0 rgba(255,255,255,0.5)'
+    : on
+      ? 'inset 0 1px 0 rgba(255,255,255,0.25), inset 0 -1px 0 rgba(0,0,0,0.25)'
+      : undefined;
+
+  return (
+    <div
+      ref={elRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      className="relative flex-1 h-6 rounded-sm overflow-hidden select-none"
+      style={{
+        background: cellBg,
+        cursor: disabled ? 'not-allowed' : on ? 'ns-resize' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        touchAction: 'none',
+      }}
+      title={disabled ? 'Select a clip first' : `${label} — drag up/down to set velocity (${Math.round(velocity * 100)}%)`}
+    >
+      {/* Velocity fill — vertical bar rising from the bottom of the
+          cell to the current velocity. Height interpolates so a drag
+          reads as the bar following the pointer. */}
+      <div
+        className="absolute left-0 right-0 bottom-0 transition-[height] duration-75"
+        style={{
+          height: `${fillPct}%`,
+          background: fillColor,
+          boxShadow: glow,
+        }}
+      />
+      {/* Top edge highlight — small horizontal line at the top of the
+          fill so the velocity level reads cleanly even at very low
+          values where the fill body would otherwise be invisible. */}
+      {on && (
+        <div
+          className="absolute left-0 right-0 transition-[bottom] duration-75 pointer-events-none"
+          style={{
+            bottom: `${fillPct}%`,
+            height: 1.5,
+            background: playing ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)',
+            boxShadow: '0 0 4px rgba(0,255,200,0.6)',
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -34,8 +34,11 @@ export interface DrumClip {
   lengthSec: number;
   patternSteps: number;
   // Steps are stored per-row. Outer index matches `rows[]`; inner array
-  // is length `patternSteps`. New rows added later get auto-padded.
-  steps: boolean[][];
+  // is length `patternSteps`. Each value is the velocity (0 = off, 0–1 =
+  // on with that gain multiplier). Toggling on uses 1.0 by default; the
+  // user can drag a cell to dial in any value in (0, 1]. New rows added
+  // later get auto-padded with zeros.
+  steps: number[][];
 }
 
 interface DrumRackState {
@@ -72,6 +75,9 @@ interface DrumRackState {
   resizeClip: (clipId: string, newLengthSec: number) => void;
   setPatternSteps: (clipId: string, n: 16 | 32) => void;
   toggleStep: (clipId: string, rowIdx: number, stepIdx: number) => void;
+  // Set the velocity of a single step. velocity in [0, 1]; 0 turns the
+  // step off. Used by the click-and-drag interaction in the step grid.
+  setStepVelocity: (clipId: string, rowIdx: number, stepIdx: number, velocity: number) => void;
   clearClip: (clipId: string) => void;
 
   // Scheduler
@@ -145,8 +151,22 @@ function makeRow(): DrumRow {
   return { id: crypto.randomUUID(), name: 'Empty', fileId: null, volume: 1, muted: false };
 }
 
-function emptySteps(rowCount: number, patternSteps: number): boolean[][] {
-  return Array.from({ length: rowCount }, () => new Array(patternSteps).fill(false));
+function emptySteps(rowCount: number, patternSteps: number): number[][] {
+  return Array.from({ length: rowCount }, () => new Array(patternSteps).fill(0));
+}
+
+// Migration helper — old projects stored steps as boolean[][]; new
+// schema uses number[][] with velocity 0..1. Coerce on load so the
+// rest of the code can assume the new shape regardless of save age.
+function coerceStepsToNumber(steps: unknown): number[][] {
+  if (!Array.isArray(steps)) return [];
+  return steps.map((row) => {
+    if (!Array.isArray(row)) return [];
+    return row.map((v) => {
+      if (typeof v === 'number') return Math.max(0, Math.min(1, v));
+      return v ? 1 : 0;
+    });
+  });
 }
 
 export const useDrumRack = create<DrumRackState>((set, get) => ({
@@ -164,7 +184,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
   addEmptyRow: () => set((s) => ({
     rows: [...s.rows, makeRow()],
     // Pad each clip's pattern with a new empty row so indices stay aligned.
-    clips: s.clips.map((c) => ({ ...c, steps: [...c.steps, new Array(c.patternSteps).fill(false)] })),
+    clips: s.clips.map((c) => ({ ...c, steps: [...c.steps, new Array(c.patternSteps).fill(0)] })),
   })),
 
   removeRow: (rowId) => set((s) => {
@@ -236,7 +256,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
     clips: s.clips.map((c) => {
       if (c.id !== clipId) return c;
       const steps = c.steps.map((row) => {
-        const next = new Array(n).fill(false);
+        const next: number[] = new Array(n).fill(0);
         for (let i = 0; i < Math.min(n, row.length); i++) next[i] = row[i];
         return next;
       });
@@ -256,8 +276,22 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
     clips: s.clips.map((c) => {
       if (c.id !== clipId) return c;
       const steps = c.steps.map((r) => r.slice());
-      if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(false);
-      steps[rowIdx][stepIdx] = !steps[rowIdx][stepIdx];
+      if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
+      // 0 → 1.0 (default full velocity). Any non-zero velocity → 0 (off).
+      // Re-toggling preserves history through the velocity slot: the
+      // user dialled a value before turning off, so the next click
+      // restores 1.0 — keeps the toggle action predictable.
+      steps[rowIdx][stepIdx] = steps[rowIdx][stepIdx] > 0 ? 0 : 1;
+      return { ...c, steps };
+    }),
+  })),
+
+  setStepVelocity: (clipId, rowIdx, stepIdx, velocity) => set((s) => ({
+    clips: s.clips.map((c) => {
+      if (c.id !== clipId) return c;
+      const steps = c.steps.map((r) => r.slice());
+      if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
+      steps[rowIdx][stepIdx] = Math.max(0, Math.min(1, velocity));
       return { ...c, steps };
     }),
   })),
@@ -314,7 +348,8 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
           for (let r = 0; r < rows.length; r++) {
             const row = rows[r];
             if (row.muted || !row.buffer) continue;
-            if (!clip.steps[r]?.[stepIdx]) continue;
+            const stepVelocity = clip.steps[r]?.[stepIdx] ?? 0;
+            if (stepVelocity <= 0) continue;
             // Lazily create a persistent per-row analyser → drum bus
             // connection. Every hit on this row routes through that
             // analyser so the row meter sees its own level, and the
@@ -330,7 +365,9 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
             const src = ctx.createBufferSource();
             src.buffer = row.buffer;
             const g = ctx.createGain();
-            g.gain.value = row.volume;
+            // Per-step velocity multiplies the row's overall volume, so
+            // a low-velocity step on a high-volume row still fires soft.
+            g.gain.value = row.volume * stepVelocity;
             src.connect(g);
             g.connect(rowAnalyser);
             // when = stepProjectTime + startedAt is the sample-accurate
@@ -382,7 +419,9 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
           open?: boolean; expanded?: boolean; tallRows?: boolean;
         };
         const rows = (data.rows || []).map((r) => ({ ...r, buffer: undefined }));
-        const clips = data.clips || [];
+        // Coerce step values to numbers — saves before the velocity
+        // refactor stored boolean[][]; new code expects number[][].
+        const clips = (data.clips || []).map((c) => ({ ...c, steps: coerceStepsToNumber(c.steps) }));
         const selectedClipId = data.selectedClipId ?? null;
         set({
           rows, clips, selectedClipId,
@@ -454,7 +493,9 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       }));
       set((s) => ({
         rows,
-        clips: payload.clips,
+        // Same boolean→number coercion on the wire — peers on older
+        // builds may still broadcast boolean[][].
+        clips: payload.clips.map((c) => ({ ...c, steps: coerceStepsToNumber(c.steps) })),
         // Keep selection local — collaborators have their own panel focus.
         selectedClipId: s.selectedClipId,
       }));
