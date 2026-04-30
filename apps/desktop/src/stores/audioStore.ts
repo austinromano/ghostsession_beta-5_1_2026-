@@ -16,7 +16,6 @@ import type { LoadedTrack, UndoSnapshot, WarpMarker, BusFxState } from './audio/
 import { buildTrackEqChain, removeTrackEq, disposeAllTrackEq } from './audio/trackEq';
 import { buildTrackCompChain, removeTrackComp, disposeAllTrackComp } from './audio/trackComp';
 import { useEffectsStore, type EqParams, type CompParams } from './effectsStore';
-import { useProjectStore } from './projectStore';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
 /**
@@ -456,15 +455,14 @@ export const useAudioStore = create<AudioState>((set, get) => {
     const ctx = getCtx();
     const { loadedTracks, projectBpm } = get();
 
-    // Walk a clip's lane chain in order and splice DSP nodes between
-    // `inputNode` and the master mixer. Returns the final output node
-    // so the caller can attach the bus-send tap to POST-FX signal.
-    // The chain is keyed by lane (fileId for normal tracks, trackId
-    // fallback) — every clip in a lane gets the same effects.
-    const projTracks = (useProjectStore.getState().currentProject?.tracks ?? []) as Array<{ id: string; fileId?: string | null }>;
+    // Walk a clip's effect chain in order and splice DSP nodes
+    // between `inputNode` and the master mixer. Returns the final
+    // output node so the caller can attach the bus-send tap to
+    // POST-FX signal. The chain is keyed by the clip's trackId so
+    // every clip carries its own independent chain — two tracks that
+    // share a source file no longer share each other's effects.
     const buildLaneChainFor = (trackId: string, inputNode: AudioNode): AudioNode => {
-      const projTrack = projTracks.find((p) => p.id === trackId);
-      const laneKey = (projTrack?.fileId && projTrack.fileId.length > 0) ? projTrack.fileId : trackId;
+      const laneKey = trackId;
       // Wipe any previous DSP for this trackId so we don't leak nodes
       // when the chain shape changes between starts.
       removeTrackEq(trackId);
