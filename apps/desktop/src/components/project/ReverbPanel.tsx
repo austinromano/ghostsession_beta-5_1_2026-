@@ -186,29 +186,37 @@ export default function ReverbPanel({
               energy={energy}
             />
           </div>
-          {/* Bottom knob row — Mix / Time / Damping. */}
+          {/* Bottom knob row — Mix / Time / Damping. Each knob lives in
+              an equal-width flex-1 slot so the longer labels (DAMPING)
+              never bump the right divider regardless of label width. */}
           <div
-            className="flex items-center justify-around px-3 pt-1 pb-2 border-t"
+            className="flex items-center px-4 pt-1 pb-2 border-t"
             style={{ borderColor: 'rgba(255,255,255,0.05)', flex: 1 }}
           >
-            <Knob
-              label="Mix"
-              valueLabel={formatPercent(mix)}
-              value={mix} min={0} max={1}
-              onChange={(v) => setReverbParam(laneKey, effect.id, 'mix', v)}
-            />
-            <Knob
-              label="Time"
-              valueLabel={formatSeconds(time)}
-              value={time} min={0.1} max={10}
-              onChange={(v) => setReverbParam(laneKey, effect.id, 'time', v)}
-            />
-            <Knob
-              label="Damping"
-              valueLabel={formatPercent(damping)}
-              value={damping} min={0} max={1}
-              onChange={(v) => setReverbParam(laneKey, effect.id, 'damping', v)}
-            />
+            <div className="flex-1 flex justify-center min-w-0">
+              <Knob
+                label="Mix"
+                valueLabel={formatPercent(mix)}
+                value={mix} min={0} max={1}
+                onChange={(v) => setReverbParam(laneKey, effect.id, 'mix', v)}
+              />
+            </div>
+            <div className="flex-1 flex justify-center min-w-0">
+              <Knob
+                label="Time"
+                valueLabel={formatSeconds(time)}
+                value={time} min={0.1} max={10}
+                onChange={(v) => setReverbParam(laneKey, effect.id, 'time', v)}
+              />
+            </div>
+            <div className="flex-1 flex justify-center min-w-0">
+              <Knob
+                label="Damping"
+                valueLabel={formatPercent(damping)}
+                value={damping} min={0} max={1}
+                onChange={(v) => setReverbParam(laneKey, effect.id, 'damping', v)}
+              />
+            </div>
           </div>
         </div>
 
