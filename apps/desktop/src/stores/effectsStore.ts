@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { setLaneEqBand, setLaneEqBypass } from './audio/trackEq';
 import { setLaneCompParam, setLaneCompBypass } from './audio/trackComp';
+import { setLaneReverbParam, setLaneReverbBypass } from './audio/trackReverb';
 import { getCtx } from './audio/graph';
 
 // Resolve the live AudioContext for filter ramps. Wrapped in a
@@ -58,8 +59,20 @@ export interface CompParams {
 }
 
 export interface ReverbParams {
-  wet: number;
+  // 0..1 — drives the visualizer's room-stack scale and biases the
+  // synthetic IR's early-reflection density.
+  size: number;
+  // 0..1 — multiplier on the decay-time envelope; renders independently
+  // from `time` because the reference UI exposes both.
   decay: number;
+  // 0..1 — wet/dry mix.
+  mix: number;
+  // Reverb tail length in seconds, 0.1..10.
+  time: number;
+  // 0..1 — high-frequency damping inside the tail (lowpass post-conv).
+  damping: number;
+  // 0..1 — stereo width of the wet path.
+  width: number;
 }
 
 export type EffectParams = EqParams | CompParams | ReverbParams;
@@ -89,7 +102,7 @@ export function defaultParams(kind: EffectKind): EffectParams {
   if (kind === 'comp') {
     return { threshold: -18, ratio: 4, attack: 10, release: 100, makeup: 2 };
   }
-  return { wet: 0.3, decay: 1.8 };
+  return { size: 0.6, decay: 0.4, mix: 0.6, time: 2.5, damping: 0.4, width: 0.35 };
 }
 
 export const EFFECT_LABEL: Record<EffectKind, string> = {
@@ -159,6 +172,8 @@ interface EffectsState {
   setEqBand: (trackId: string, effectId: string, bandIndex: number, patch: Partial<EqBand>) => void;
   // Comp-only helper: update a single field on the compressor params.
   setCompParam: (trackId: string, effectId: string, field: keyof CompParams, value: number) => void;
+  // Reverb-only helper.
+  setReverbParam: (trackId: string, effectId: string, field: keyof ReverbParams, value: number) => void;
 }
 
 const EMPTY: Effect[] = [];
@@ -278,6 +293,8 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
         setLaneEqBypass(trackId, t.bypassed, getCtxIfPresent());
       } else if (t.kind === 'comp') {
         setLaneCompBypass(trackId, t.bypassed, getCtxIfPresent());
+      } else if (t.kind === 'reverb') {
+        setLaneReverbBypass(trackId, t.bypassed, getCtxIfPresent());
       }
     }
   },
@@ -348,6 +365,25 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
     // Live-push to every clip's worklet in the lane. trackId here IS
     // the laneKey (drops are stored by laneKey).
     setLaneCompParam(trackId, field, value, getCtxIfPresent());
+  },
+
+  setReverbParam: (trackId, effectId, field, value) => {
+    const pid = get().currentProjectId;
+    if (!pid) return;
+    const next = new Map(get().byProject);
+    const proj = new Map(next.get(pid) ?? new Map<string, Effect[]>());
+    const existing = proj.get(trackId) ?? [];
+    const updated = existing.map((e) => {
+      if (e.id !== effectId || e.kind !== 'reverb') return e;
+      const base = (e.params as ReverbParams | undefined) ?? (defaultParams('reverb') as ReverbParams);
+      return { ...e, params: { ...base, [field]: value } as ReverbParams };
+    });
+    proj.set(trackId, updated);
+    next.set(pid, proj);
+    set({ byProject: next });
+    persistProject(pid, proj);
+    // Push live to the per-clip reverb DSP nodes for this lane.
+    setLaneReverbParam(trackId, field, value, getCtxIfPresent());
   },
 
   setEqBand: (trackId, effectId, bandIndex, patch) => {

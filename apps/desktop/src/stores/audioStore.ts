@@ -15,7 +15,8 @@ import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOp
 import type { LoadedTrack, UndoSnapshot, WarpMarker, BusFxState } from './audio/types';
 import { buildTrackEqChain, removeTrackEq, disposeAllTrackEq } from './audio/trackEq';
 import { buildTrackCompChain, removeTrackComp, disposeAllTrackComp } from './audio/trackComp';
-import { useEffectsStore, DRUM_RACK_FX_KEY, type EqParams, type CompParams } from './effectsStore';
+import { buildTrackReverbChain, removeTrackReverb, disposeAllTrackReverb } from './audio/trackReverb';
+import { useEffectsStore, DRUM_RACK_FX_KEY, type EqParams, type CompParams, type ReverbParams } from './effectsStore';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
 /**
@@ -467,6 +468,7 @@ export const useAudioStore = create<AudioState>((set, get) => {
       // when the chain shape changes between starts.
       removeTrackEq(trackId);
       removeTrackComp(trackId);
+      removeTrackReverb(trackId);
       const chain = useEffectsStore.getState().getChain(laneKey);
       let cursor: AudioNode = inputNode;
       for (const fx of chain) {
@@ -479,8 +481,11 @@ export const useAudioStore = create<AudioState>((set, get) => {
             const comp = buildTrackCompChain(ctx, trackId, laneKey, fx.params as CompParams, fx.bypassed);
             cursor.connect(comp.input);
             cursor = comp.output;
+          } else if (fx.kind === 'reverb' && fx.params && 'mix' in fx.params) {
+            const rev = buildTrackReverbChain(ctx, trackId, laneKey, fx.params as ReverbParams, fx.bypassed);
+            cursor.connect(rev.input);
+            cursor = rev.output;
           }
-          // reverb skipped — no DSP wiring yet, visual placeholder only.
         } catch (err) {
           if (typeof console !== 'undefined') console.warn('[audioStore] FX build failed for', fx.kind, err);
         }
@@ -1568,10 +1573,12 @@ export const useAudioStore = create<AudioState>((set, get) => {
       undoStack.length = 0;
       redoStack.length = 0;
       clearAudioCaches();
-      // Drop every per-track EQ + Comp chain so the next project
-      // doesn't inherit orphan filter / worklet nodes.
+      // Drop every per-track EQ + Comp + Reverb chain so the next
+      // project doesn't inherit orphan filter / worklet / convolver
+      // nodes.
       disposeAllTrackEq();
       disposeAllTrackComp();
+      disposeAllTrackReverb();
       set({
         isPlaying: false, currentTime: 0, loadedTracks: new Map(), duration: 0,
         projectBpm: 0, soloPlayingTrackId: null, soloCurrentTime: 0, soloDuration: 0,
@@ -1591,6 +1598,7 @@ function rebuildDrumBusFx() {
     // pass so we don't leak biquad / compressor nodes across rewires.
     removeTrackEq(DRUM_RACK_FX_KEY);
     removeTrackComp(DRUM_RACK_FX_KEY);
+    removeTrackReverb(DRUM_RACK_FX_KEY);
     const chain = useEffectsStore.getState().getChain(DRUM_RACK_FX_KEY);
     if (!chain || chain.length === 0) {
       wireDrumBusOutput(null);
@@ -1605,6 +1613,8 @@ function rebuildDrumBusFx() {
           stage = buildTrackEqChain(ctx, DRUM_RACK_FX_KEY, DRUM_RACK_FX_KEY, (fx.params as EqParams).bands as any, fx.bypassed);
         } else if (fx.kind === 'comp' && fx.params && 'threshold' in fx.params) {
           stage = buildTrackCompChain(ctx, DRUM_RACK_FX_KEY, DRUM_RACK_FX_KEY, fx.params as CompParams, fx.bypassed);
+        } else if (fx.kind === 'reverb' && fx.params && 'mix' in fx.params) {
+          stage = buildTrackReverbChain(ctx, DRUM_RACK_FX_KEY, DRUM_RACK_FX_KEY, fx.params as ReverbParams, fx.bypassed);
         }
         if (!stage) continue;
         if (!firstInput) firstInput = stage.input;
