@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { motion } from 'framer-motion';
 import {
   defaultParams,
@@ -6,6 +6,7 @@ import {
   type Effect,
   type ReverbParams,
 } from '../../stores/effectsStore';
+import { getLaneReverbAnalyser } from '../../stores/audio/trackReverb';
 
 // Reverb panel — visual + DSP. Matches the user-supplied reference:
 //
@@ -31,8 +32,10 @@ import {
 // `mix`, and `decay` shifts the stack's total height.
 
 const ACCENT = '#a855f7';
-const PANEL_W = 520;
-const PANEL_H = 400;
+// Sized to match ChannelEqPanel + CompressorPanel so all three plugins
+// align in the chain rail.
+const PANEL_W = 420;
+const PANEL_H = 252;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -133,17 +136,21 @@ export default function ReverbPanel({
         )}
       </div>
 
-      {/* Main row: visualization + Size/Decay column */}
-      <div className="flex gap-3 px-4 pt-3 pb-2" style={{ height: 240 }}>
-        <RoomVisualizer size={size} decay={decay} mix={mix} />
-        <div className="flex flex-col items-center gap-3 shrink-0 pl-2 border-l" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+      {/* Main row: visualization + Size/Decay column. Tightened so
+          the panel fits 252 px total height while still giving the
+          iso-cube stack room to breathe. */}
+      <div className="flex gap-2 px-3 pt-2 pb-1" style={{ height: 130 }}>
+        <RoomVisualizer laneKey={laneKey} size={size} decay={decay} mix={mix} />
+        <div className="flex flex-col items-center justify-center gap-1 shrink-0 pl-2 border-l" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
           <Knob
+            compact
             label="Size"
             valueLabel={formatPercent(size)}
             value={size} min={0} max={1}
             onChange={(v) => setReverbParam(laneKey, effect.id, 'size', v)}
           />
           <Knob
+            compact
             label="Decay"
             valueLabel={formatPercent(decay)}
             value={decay} min={0} max={1}
@@ -153,57 +160,115 @@ export default function ReverbPanel({
       </div>
 
       {/* Bottom knob row */}
-      <div className="flex items-center justify-around px-4 pt-2 pb-3 border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+      <div className="flex items-center justify-around px-3 pt-1 pb-2 border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
         <Knob
           label="Mix"
           valueLabel={formatPercent(mix)}
           value={mix} min={0} max={1}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'mix', v)}
-          large
         />
         <Knob
           label="Time"
           valueLabel={formatSeconds(time)}
           value={time} min={0.1} max={10}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'time', v)}
-          large
         />
         <Knob
           label="Damping"
           valueLabel={formatPercent(damping)}
           value={damping} min={0} max={1}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'damping', v)}
-          large
         />
         <Knob
           label="Width"
           valueLabel={formatPercent(width)}
           value={width} min={0} max={1}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'width', v)}
-          large
         />
       </div>
     </div>
   );
 }
 
-// 3D isometric step-pyramid visualization. Each layer is a parallelogram
-// scaled by `size`. The whole stack opacity scales with `mix` so a dry
-// reverb fades back into the floor. Framer Motion animates layer
-// transitions when params change.
-function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix: number }) {
-  const VIEW_W = 280;
-  const VIEW_H = 220;
+// 3D isometric step-pyramid visualization. Each layer is a
+// parallelogram scaled by `size`. The whole stack opacity scales
+// with `mix` and PULSES on each audio peak via the lane's reverb
+// output analyser — the iso cubes brighten and bloom when audio
+// flows through, so you can SEE the reverb being applied.
+function RoomVisualizer({ laneKey, size, decay, mix }: { laneKey: string; size: number; decay: number; mix: number }) {
+  const VIEW_W = 220;
+  const VIEW_H = 130;
   const cx = VIEW_W / 2;
-  const baseY = VIEW_H * 0.78;
+  const baseY = VIEW_H * 0.80;
+
+  // Refs the rAF loop writes into. Each layer's <g> opacity + glow
+  // halo radius reflect the live audio level without React re-renders.
+  const stackGroupRef = useRef<SVGGElement | null>(null);
+  const haloRef = useRef<SVGEllipseElement | null>(null);
+  const ringRefs = useRef<Array<SVGEllipseElement | null>>([]);
+
+  useEffect(() => {
+    let raf = 0;
+    let buf: Float32Array | null = null;
+    let smoothed = 0;
+    const tick = () => {
+      raf = requestAnimationFrame(tick);
+      const a = getLaneReverbAnalyser(laneKey);
+      let level = 0;
+      if (a) {
+        const bins = a.fftSize;
+        if (!buf || buf.length !== bins) buf = new Float32Array(bins);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        a.getFloatTimeDomainData(buf as any);
+        let sum = 0;
+        for (let i = 0; i < bins; i++) sum += buf[i] * buf[i];
+        level = Math.sqrt(sum / bins);
+      }
+      // Asymmetric smoothing — fast attack, slow release. Mimics the
+      // way reverb tails decay so the visualization "feels" reverb-y.
+      const ATTACK = 0.40;
+      const RELEASE = 0.06;
+      smoothed = level > smoothed
+        ? smoothed + (level - smoothed) * ATTACK
+        : smoothed + (level - smoothed) * RELEASE;
+      // Map RMS to a 0..1 "energy" curve.
+      const energy = clamp(Math.pow(smoothed * 4, 0.6), 0, 1);
+      // Stack-wide opacity bloom on peaks.
+      const stackEl = stackGroupRef.current;
+      if (stackEl) {
+        stackEl.setAttribute('opacity', String(0.65 + energy * 0.35));
+      }
+      // Floor halo pulses bigger on peaks.
+      const halo = haloRef.current;
+      if (halo) {
+        const rx = 90 + energy * 40;
+        const ry = 14 + energy * 8;
+        halo.setAttribute('rx', String(rx));
+        halo.setAttribute('ry', String(ry));
+        halo.setAttribute('opacity', String(0.20 + energy * 0.55));
+      }
+      // Concentric expanding rings — one per layer — fade outward as
+      // energy peaks. Reads as audio "splashing" through the room.
+      ringRefs.current.forEach((ring, i) => {
+        if (!ring) return;
+        const offset = i * 0.22;
+        const phase = clamp(energy - offset, 0, 1);
+        ring.setAttribute('opacity', String(phase * 0.55));
+        ring.setAttribute('stroke-width', String(0.5 + phase * 1.2));
+      });
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [laneKey]);
+
   // Number of layers and base half-widths. Bigger size pushes the
   // base layer outward; decay raises the whole stack.
   const layers = useMemo(() => {
     const n = 4;
     const out: Array<{ halfW: number; halfH: number; y: number; opacity: number }> = [];
-    const baseHalfW = 40 + size * 80;        // 40..120
-    const baseHalfH = baseHalfW * 0.4;
-    const vertSpacing = 14 + decay * 16;     // 14..30
+    const baseHalfW = 28 + size * 56;       // 28..84
+    const baseHalfH = baseHalfW * 0.42;
+    const vertSpacing = 8 + decay * 12;     // 8..20
     for (let i = 0; i < n; i++) {
       const t = i / (n - 1);
       const halfW = baseHalfW * (1 - t * 0.65);
@@ -214,13 +279,13 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
     return out;
   }, [size, decay]);
 
-  // dB scale on left (visual only), ms scale on right.
-  const dBLabels = ['+20', '+10', '0', '-10', '-20', '-30'];
+  // Scale labels — dB on the left, ms on the right (visual only).
+  const dBLabels = ['+10', '0', '-10', '-20', '-30'];
   const msLabels = ['0', '10', '20', '30'];
 
   return (
-    <div className="relative shrink-0" style={{ width: VIEW_W, height: VIEW_H }}>
-      <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width={VIEW_W} height={VIEW_H} style={{ display: 'block' }}>
+    <div className="relative shrink-0 grow" style={{ height: VIEW_H }}>
+      <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width="100%" height={VIEW_H} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
         <defs>
           <linearGradient id="roomTopGrad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#c084fc" stopOpacity="0.85" />
@@ -234,55 +299,90 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
             <stop offset="0%" stopColor="#581c87" stopOpacity="0.30" />
             <stop offset="100%" stopColor={ACCENT} stopOpacity="0.20" />
           </linearGradient>
-          <linearGradient id="roomGlowGrad" cx="0.5" cy="1" r="0.7">
-            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.30" />
+          <radialGradient id="roomGlowGrad" cx="0.5" cy="1" r="0.7">
+            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.55" />
             <stop offset="100%" stopColor={ACCENT} stopOpacity="0" />
-          </linearGradient>
+          </radialGradient>
         </defs>
 
-        {/* Faint ambient floor glow */}
-        <ellipse cx={cx} cy={baseY + 8} rx={150} ry={20} fill="url(#roomGlowGrad)" opacity={0.6 * mix + 0.2} />
+        {/* Pulsing floor halo — driven by output analyser. */}
+        <ellipse ref={haloRef} cx={cx} cy={baseY + 8} rx={90} ry={14} fill="url(#roomGlowGrad)" opacity={0.30} />
 
-        {/* Floor plane outline (the largest base) — drawn slightly
-            transparent regardless of layer count so the room reads
-            as sitting on a floor. */}
-        <PerspectivePlane cx={cx} y={baseY + 6} halfW={layers[0]?.halfW ?? 80} halfH={(layers[0]?.halfH ?? 30) * 1.05} fillTop="rgba(168,85,247,0.10)" fillLeft="transparent" fillRight="transparent" stroke="rgba(168,134,255,0.20)" />
-
-        {/* Stacked iso boxes from bottom up. We use Framer Motion's
-            <motion.g> so size + decay changes animate smoothly. */}
+        {/* Concentric rings — one per layer, expanding outward as
+            audio energy rises. */}
         {layers.map((layer, i) => (
-          <motion.g
-            key={`layer-${i}`}
-            animate={{ opacity: layer.opacity * (0.3 + 0.7 * mix) }}
-            transition={{ type: 'spring', stiffness: 180, damping: 22 }}
-          >
-            <PerspectivePlane
-              cx={cx}
-              y={layer.y}
-              halfW={layer.halfW}
-              halfH={layer.halfH}
-              fillTop="url(#roomTopGrad)"
-              fillLeft="url(#roomLeftGrad)"
-              fillRight="url(#roomRightGrad)"
-              stroke="rgba(232,213,255,0.30)"
-              showSides={i > 0}
-              sideHeight={i === layers.length - 1 ? 0 : (layers[i + 1]?.y ?? layer.y) - layer.y}
-            />
-          </motion.g>
+          <ellipse
+            key={`ring-${i}`}
+            ref={(el) => { ringRefs.current[i] = el; }}
+            cx={cx}
+            cy={layer.y + layer.halfH * 0.4}
+            rx={layer.halfW + 14 + i * 6}
+            ry={(layer.halfH + 6 + i * 2)}
+            fill="none"
+            stroke={ACCENT}
+            strokeOpacity={0.7}
+            strokeWidth={0.5}
+            opacity={0}
+          />
         ))}
+
+        {/* Floor plane outline (the largest base). */}
+        <PerspectivePlane
+          cx={cx}
+          y={baseY + 4}
+          halfW={layers[0]?.halfW ?? 60}
+          halfH={(layers[0]?.halfH ?? 24) * 1.1}
+          fillTop="rgba(168,85,247,0.10)"
+          fillLeft="transparent"
+          fillRight="transparent"
+          stroke="rgba(168,134,255,0.22)"
+        />
+
+        {/* Stacked iso boxes from bottom up. <motion.g> wraps the
+            whole stack so size + decay changes animate spring-style.
+            The audio-driven opacity bloom is applied via a child
+            <g ref> so it doesn't fight Framer's animation. */}
+        <motion.g
+          animate={{ scale: 1, opacity: 0.3 + 0.7 * mix }}
+          transition={{ type: 'spring', stiffness: 200, damping: 24 }}
+          style={{ transformOrigin: `${cx}px ${baseY}px` }}
+        >
+          <g ref={stackGroupRef}>
+            {layers.map((layer, i) => (
+              <motion.g
+                key={`layer-${i}`}
+                animate={{ opacity: layer.opacity }}
+                transition={{ type: 'spring', stiffness: 180, damping: 22 }}
+              >
+                <PerspectivePlane
+                  cx={cx}
+                  y={layer.y}
+                  halfW={layer.halfW}
+                  halfH={layer.halfH}
+                  fillTop="url(#roomTopGrad)"
+                  fillLeft="url(#roomLeftGrad)"
+                  fillRight="url(#roomRightGrad)"
+                  stroke="rgba(232,213,255,0.30)"
+                  showSides={i > 0}
+                  sideHeight={i === layers.length - 1 ? 0 : (layers[i + 1]?.y ?? layer.y) - layer.y}
+                />
+              </motion.g>
+            ))}
+          </g>
+        </motion.g>
 
         {/* Y-axis labels (left = dB) */}
         {dBLabels.map((label, i) => {
-          const y = 28 + (i / (dBLabels.length - 1)) * (VIEW_H - 60);
+          const y = 22 + (i / (dBLabels.length - 1)) * (VIEW_H - 50);
           return (
-            <text key={`db-${i}`} x={4} y={y} fill="rgba(255,255,255,0.40)" fontSize={9} fontFamily="monospace">{label}</text>
+            <text key={`db-${i}`} x={2} y={y} fill="rgba(255,255,255,0.35)" fontSize={7.5} fontFamily="monospace">{label}</text>
           );
         })}
         {/* Y-axis labels (right = ms) */}
         {msLabels.map((label, i) => {
-          const y = 32 + (i / (msLabels.length - 1)) * (VIEW_H - 70);
+          const y = 26 + (i / (msLabels.length - 1)) * (VIEW_H - 60);
           return (
-            <text key={`ms-${i}`} x={VIEW_W - 22} y={y} fill="rgba(255,255,255,0.40)" fontSize={9} fontFamily="monospace">{label}</text>
+            <text key={`ms-${i}`} x={VIEW_W - 14} y={y} fill="rgba(255,255,255,0.35)" fontSize={7.5} fontFamily="monospace">{label}</text>
           );
         })}
       </svg>
@@ -323,7 +423,7 @@ function PerspectivePlane({
 // Round purple knob — drag vertically to change. Same visual idiom as
 // CompressorPanel's knob; copied here so the reverb panel can size
 // independently (the reverb knobs are bigger).
-function Knob({ label, valueLabel, value, min, max, onChange, large = false }: {
+function Knob({ label, valueLabel, value, min, max, onChange, large = false, compact = false }: {
   label: string;
   valueLabel: string;
   value: number;
@@ -331,10 +431,11 @@ function Knob({ label, valueLabel, value, min, max, onChange, large = false }: {
   max: number;
   onChange: (v: number) => void;
   large?: boolean;
+  compact?: boolean;
 }) {
   const dragStartRef = useRef<{ y: number; v: number } | null>(null);
-  const SIZE = large ? 56 : 44;
-  const RADIUS = large ? 24 : 19;
+  const SIZE = large ? 56 : compact ? 36 : 44;
+  const RADIUS = large ? 24 : compact ? 14 : 19;
 
   const t = clamp((value - min) / (max - min), 0, 1);
   const startAngle = -135;
