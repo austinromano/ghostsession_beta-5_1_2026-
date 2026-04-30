@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { getCtx, getDrumBus, safeStop } from './audio/graph';
 import { audioBufferCache, getAudioData } from '../lib/audio';
-import { useAudioStore } from './audioStore';
+import { useAudioStore, getStartedAt } from './audioStore';
 import { sendSessionAction } from '../lib/socket';
 
 // Drum-rack / step-sequencer store.
@@ -280,17 +280,19 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       const stepDur = 60 / projectBpm / 4; // 16th note
       const lookahead = 0.12;
 
-      // Map AudioContext time → project time via the started-at anchor that
-      // audioStore's playback maintains. Approximating as ctx.currentTime
-      // − (ctx.currentTime − projectStartedAt) is what audioStore does;
-      // here we just use audio.currentTime + a small lead, since the
-      // RAF-driven currentTime is updated at ~60fps.
-      const horizonProjectTime = audio.currentTime + lookahead;
+      // Use the sample-accurate ctx → project anchor instead of the
+      // RAF-driven audio.currentTime, which can be up to ~16ms stale.
+      // The stale gap was being baked into every scheduled hit's `when`,
+      // pushing them late — most audible on hi-hats (16ths) where any
+      // delay reads as drag. projectTime = ctxNow - startedAt.
       const ctxNow = ctx.currentTime;
+      const startedAt = getStartedAt();
+      const projectNow = ctxNow - startedAt;
+      const horizonProjectTime = projectNow + lookahead;
 
       for (const clip of get().clips) {
         const clipEnd = clip.startSec + clip.lengthSec;
-        if (clipEnd <= audio.currentTime) continue;
+        if (clipEnd <= projectNow) continue;
         if (clip.startSec >= horizonProjectTime) continue;
         // Walk the clip's step indices that intersect the lookahead window.
         const clipDur = clip.lengthSec;
@@ -298,11 +300,11 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         if (stepsPerClip <= 0) continue;
         // Iterate every absolute step in this clip and schedule any whose
         // project-time hits in the [now, horizon] window.
-        const startStep = Math.max(0, Math.floor((audio.currentTime - clip.startSec) / stepDur));
+        const startStep = Math.max(0, Math.floor((projectNow - clip.startSec) / stepDur));
         const endStep = Math.min(stepsPerClip, Math.ceil((horizonProjectTime - clip.startSec) / stepDur) + 1);
         for (let absStep = startStep; absStep < endStep; absStep++) {
           const stepProjectTime = clip.startSec + absStep * stepDur;
-          if (stepProjectTime < audio.currentTime - 0.005) continue;
+          if (stepProjectTime < projectNow - 0.005) continue;
           if (stepProjectTime > horizonProjectTime) continue;
           const queueKey = `${clip.id}:${absStep}`;
           if (queued.has(queueKey)) continue;
@@ -331,7 +333,10 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
             g.gain.value = row.volume;
             src.connect(g);
             g.connect(rowAnalyser);
-            const when = ctxNow + (stepProjectTime - audio.currentTime);
+            // when = stepProjectTime + startedAt is the sample-accurate
+            // ctx-time anchor (algebraically equal to ctxNow + (stepProjectTime - projectNow))
+            // but built directly off startedAt so we don't lose precision.
+            const when = stepProjectTime + startedAt;
             src.start(Math.max(ctxNow, when));
             activeSources.add(src);
             src.onended = () => {
@@ -344,7 +349,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       // Drop stale queued entries far behind the playhead so the set
       // doesn't grow unbounded over a long session.
       if (queued.size > 4096) {
-        const cutoff = audio.currentTime - 5;
+        const cutoff = projectNow - 5;
         queued.forEach((k) => {
           const [, stepStr] = k.split(':');
           const t = parseInt(stepStr, 10) * stepDur;

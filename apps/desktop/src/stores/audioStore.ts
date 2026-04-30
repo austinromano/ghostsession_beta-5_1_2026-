@@ -227,6 +227,14 @@ export function getAnalyser(): AnalyserNode | null {
   return getAnalyserNode();
 }
 
+// AudioContext-time anchor for the start of the current project play.
+// `projectTime = ctx.currentTime - getStartedAt()`. Schedulers (drum rack,
+// MIDI step sequencer) need this to convert ctx-time → project-time without
+// the ~16ms staleness of the RAF-driven `currentTime` field.
+export function getStartedAt(): number {
+  return startedAt;
+}
+
 // Offsets to apply when a track first lands in the store via
 // loadTrack / loadTrackFromBuffer. Used by the duplicate flow so the new clip
 // arrives at the intended position instead of defaulting to 0 and overlapping
