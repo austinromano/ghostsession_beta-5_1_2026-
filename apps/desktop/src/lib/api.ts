@@ -35,6 +35,7 @@ export const api = {
   register: (data: RegisterRequest) => request<AuthResponse>('POST', '/auth/register', data),
   logout: () => request<void>('POST', '/auth/logout'),
   me: () => request<User>('GET', '/auth/me'),
+  addPoints: (delta: number) => request<{ points: number }>('POST', '/auth/me/points', { delta }),
   deleteAccount: () => request<void>('DELETE', '/auth/account'),
   uploadAvatar: async (file: File): Promise<{ avatarUrl: string }> => {
     const formData = new FormData();

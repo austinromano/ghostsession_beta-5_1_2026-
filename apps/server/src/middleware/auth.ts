@@ -8,6 +8,8 @@ export interface AuthUser {
   displayName: string;
   avatarUrl: string | null;
   createdAt: string;
+  points: number;
+  tier: 'free' | 'pro';
 }
 
 export async function authMiddleware(c: Context, next: Next) {

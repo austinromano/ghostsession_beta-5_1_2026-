@@ -4,7 +4,7 @@ import { HTTPException } from 'hono/http-exception';
 import { db } from '../db/index.js';
 import { users, authSessions, projects, projectMembers, tracks, versions, comments, invitations, files, chatMessages, notifications, trackLikes, samplePacks, samplePackItems } from '../db/schema.js';
 import { eq, inArray } from 'drizzle-orm';
-import { hashPassword, verifyPassword, createSession, invalidateSession } from '../services/auth.js';
+import { hashPassword, verifyPassword, createSession, invalidateSession, addPoints } from '../services/auth.js';
 import { authMiddleware } from '../middleware/auth.js';
 
 
@@ -44,7 +44,7 @@ auth.post('/register', async (c) => {
     success: true,
     data: {
       token,
-      user: { id, email: body.email, displayName: body.displayName, avatarUrl: null, createdAt: new Date().toISOString() },
+      user: { id, email: body.email, displayName: body.displayName, avatarUrl: null, createdAt: new Date().toISOString(), points: 0, tier: 'free' },
     },
   });
 });
@@ -70,6 +70,8 @@ auth.post('/login', async (c) => {
         displayName: user.displayName,
         avatarUrl: user.avatarUrl,
         createdAt: user.createdAt,
+        points: user.points ?? 0,
+        tier: (user.tier as 'free' | 'pro') ?? 'free',
       },
     },
   });
@@ -84,6 +86,20 @@ auth.post('/logout', authMiddleware, async (c) => {
 auth.get('/me', authMiddleware, async (c) => {
   const user = c.get('user');
   return c.json({ success: true, data: user });
+});
+
+// Point system primitive — debug / future "earn" hooks call this with
+// a positive delta. Negative deltas spend points (clamped at 0). Only
+// the authenticated user can adjust their own balance through this
+// route; server-side automated awards bypass this and call addPoints
+// directly. Schema: { delta: number }.
+auth.post('/me/points', authMiddleware, async (c) => {
+  const user = c.get('user') as { id: string };
+  const body = await c.req.json().catch(() => ({} as Record<string, unknown>));
+  const delta = typeof body.delta === 'number' && Number.isFinite(body.delta) ? Math.trunc(body.delta) : 0;
+  if (delta === 0) return c.json({ success: true, data: { points: 0 } });
+  const next = await addPoints(user.id, delta);
+  return c.json({ success: true, data: { points: next } });
 });
 
 auth.post('/avatar', authMiddleware, async (c) => {

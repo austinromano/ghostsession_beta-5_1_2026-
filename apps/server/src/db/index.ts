@@ -258,6 +258,8 @@ export async function initDatabase() {
     `ALTER TABLE sample_library_files ADD COLUMN sample_character TEXT`,
     `ALTER TABLE sample_library_files ADD COLUMN crest_factor REAL`,
     `ALTER TABLE projects ADD COLUMN share_token TEXT`,
+    `ALTER TABLE users ADD COLUMN points INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE users ADD COLUMN tier TEXT NOT NULL DEFAULT 'free'`,
   ];
   // ADD COLUMN migrations are idempotent by design — "duplicate column" is expected
   // on every boot after the first. Any other error is worth surfacing.

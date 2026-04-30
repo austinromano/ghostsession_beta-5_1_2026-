@@ -27,6 +27,9 @@ export default function UserVoiceBar({ onSettings }: { onSettings?: () => void }
 
   const inSession = !!currentProjectId;
   const status = micError ? 'Mic blocked' : inSession ? 'In session' : 'Invisible';
+  const points = user?.points ?? 0;
+  const isPro = user?.tier === 'pro';
+  const formattedPoints = points.toLocaleString();
 
   return (
     <div
@@ -38,11 +41,37 @@ export default function UserVoiceBar({ onSettings }: { onSettings?: () => void }
     >
       <Avatar name={user?.displayName || '?'} src={user?.avatarUrl} size="sm" />
       <div className="flex-1 min-w-0 leading-tight">
-        <div className="text-[12.5px] font-semibold text-white truncate">
-          {user?.displayName || 'Guest'}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[12.5px] font-semibold text-white truncate" title={status}>
+            {user?.displayName || 'Guest'}
+          </span>
+          {isPro && (
+            <span
+              className="shrink-0 px-1.5 py-[1px] rounded text-[8.5px] font-bold tracking-wide text-white"
+              style={{
+                background: 'linear-gradient(135deg, #a855f7 0%, #6d28d9 100%)',
+                letterSpacing: '0.04em',
+              }}
+            >
+              PRO
+            </span>
+          )}
         </div>
-        <div className={`text-[10.5px] truncate ${micError ? 'text-red-400' : 'text-white/45'}`}>
-          {status}
+        <div className={`flex items-center gap-1 text-[10.5px] truncate ${micError ? 'text-red-400' : 'text-white/65'}`}>
+          {micError ? (
+            <span>{status}</span>
+          ) : (
+            <>
+              {/* Coin glyph for the points balance — purple ring with a
+                  inner highlight so it reads as a token, matching the
+                  reference Discord-loyalty chip. */}
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="2.2">
+                <circle cx="12" cy="12" r="9" />
+                <circle cx="12" cy="12" r="4.5" stroke="#c084fc" strokeWidth="1.6" />
+              </svg>
+              <span className="tabular-nums font-medium text-white/85">{formattedPoints}</span>
+            </>
+          )}
         </div>
       </div>
       <button

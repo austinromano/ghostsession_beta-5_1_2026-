@@ -50,6 +50,8 @@ export async function validateSession(token: string) {
       displayName: users.displayName,
       avatarUrl: users.avatarUrl,
       createdAt: users.createdAt,
+      points: users.points,
+      tier: users.tier,
     })
     .from(users)
     .where(eq(users.id, session.userId))
@@ -57,6 +59,24 @@ export async function validateSession(token: string) {
     .all();
 
   return userResults[0] || null;
+}
+
+/** Increment a user's points balance by `delta`. Negative values are
+ * allowed to spend points; the caller is responsible for any clamping
+ * (e.g. enforcing balance >= 0 before calling). Returns the new total. */
+export async function addPoints(userId: string, delta: number): Promise<number> {
+  const rows = await db.select({ points: users.points }).from(users).where(eq(users.id, userId)).limit(1).all();
+  const cur = rows[0]?.points ?? 0;
+  const next = Math.max(0, cur + delta);
+  await db.update(users).set({ points: next }).where(eq(users.id, userId)).run();
+  return next;
+}
+
+/** Set a user's tier (e.g. 'free' → 'pro'). Used by the billing flow
+ * once it lands; for now exposed as a primitive that other services
+ * can call. */
+export async function setTier(userId: string, tier: 'free' | 'pro'): Promise<void> {
+  await db.update(users).set({ tier }).where(eq(users.id, userId)).run();
 }
 
 export async function invalidateSession(token: string) {

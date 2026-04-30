@@ -13,6 +13,12 @@ export const users = sqliteTable('users', {
   avatarMime: text('avatar_mime'),
   hashedPassword: text('hashed_password').notNull(),
   createdAt: timestamp('created_at').notNull(),
+  // Loyalty / points system. Points accumulate via in-app actions and
+  // drive the badge shown next to the user's name. Tier is a coarse
+  // pro / free flag so we can ship a "PRO" pill independently of the
+  // points balance.
+  points: integer('points').notNull().default(0),
+  tier: text('tier').notNull().default('free'),
 });
 
 export const authSessions = sqliteTable('auth_sessions', {

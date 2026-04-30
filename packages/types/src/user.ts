@@ -1,9 +1,13 @@
+export type UserTier = 'free' | 'pro';
+
 export interface User {
   id: string;
   email: string;
   displayName: string;
   avatarUrl: string | null;
   createdAt: string;
+  points: number;
+  tier: UserTier;
 }
 
 export interface ProducerProfile {
