@@ -35,13 +35,12 @@ import {
 
 const PANEL_W = 304;
 
-// Transfer-curve graph dimensions. Sized so the panel ends up at the
-// same overall height as ChannelEqPanel — graph is shorter than EQ's
-// because the comp adds a knob row underneath, while the EQ uses the
-// equivalent space for its band readouts.
+// Transfer-curve graph dimensions. Matched to ChannelEqPanel's graph
+// height so the two panels render at the same overall height when
+// they sit side-by-side in the chain rail.
 const GRAPH_VIEW_W = 150;
-const GRAPH_VIEW_H = 96;
-const GRAPH_PAD = 6;
+const GRAPH_VIEW_H = 130;
+const GRAPH_PAD = 8;
 const GRAPH_PLOT_X = GRAPH_PAD;
 const GRAPH_PLOT_Y = GRAPH_PAD;
 const GRAPH_PLOT_W = GRAPH_VIEW_W - GRAPH_PAD * 2;
@@ -672,7 +671,7 @@ function MeterColumn({
       <span className="text-[8px] font-semibold text-white/55 uppercase tracking-wider">{label}</span>
       <div
         className="rounded-sm overflow-hidden flex flex-col-reverse items-stretch gap-[1px] py-[1px] px-[1px]"
-        style={{ width: 9, height: 80, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
+        style={{ width: 9, height: 110, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.08)' }}
       >
         {Array.from({ length: SEGMENTS }, (_, i) => (
           <div
