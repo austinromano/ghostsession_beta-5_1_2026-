@@ -7,7 +7,7 @@ import {
   ensureWarpedPlaybackWorklet, createWarpedPlaybackNode, ensureTrackCompressorWorklet,
   setBusEqBand, setBusCompParam, setBusReverbWet, setBusReverbDecay,
   getBusEqBand, getBusCompParam, getBusReverbWet, getBusReverbDecay,
-  getFxBusInput,
+  getFxBusInput, wireDrumBusOutput,
   type WarpedParams,
 } from './audio/graph';
 import { save as saveArrangement, load as loadArrangement } from './audio/arrangement';
@@ -15,7 +15,7 @@ import { cloneBuffer, loopBufferToLength, splitBufferAt } from './audio/bufferOp
 import type { LoadedTrack, UndoSnapshot, WarpMarker, BusFxState } from './audio/types';
 import { buildTrackEqChain, removeTrackEq, disposeAllTrackEq } from './audio/trackEq';
 import { buildTrackCompChain, removeTrackComp, disposeAllTrackComp } from './audio/trackComp';
-import { useEffectsStore, type EqParams, type CompParams } from './effectsStore';
+import { useEffectsStore, DRUM_RACK_FX_KEY, type EqParams, type CompParams } from './effectsStore';
 import { adaptiveStretch, type SampleCharacter } from '../lib/stretch';
 
 /**
@@ -1581,12 +1581,54 @@ export const useAudioStore = create<AudioState>((set, get) => {
   };
 });
 
+// Rebuild the drum-rack effect chain wired between drumBus and the
+// mixer. Called on rewire AND at module load so the rack picks up
+// any persisted chain even before the user presses play.
+function rebuildDrumBusFx() {
+  try {
+    const ctx = getCtx();
+    // Tear down whatever was registered on the drum-rack key last
+    // pass so we don't leak biquad / compressor nodes across rewires.
+    removeTrackEq(DRUM_RACK_FX_KEY);
+    removeTrackComp(DRUM_RACK_FX_KEY);
+    const chain = useEffectsStore.getState().getChain(DRUM_RACK_FX_KEY);
+    if (!chain || chain.length === 0) {
+      wireDrumBusOutput(null);
+      return;
+    }
+    let firstInput: AudioNode | null = null;
+    let cursor: AudioNode | null = null;
+    for (const fx of chain) {
+      try {
+        let stage: { input: AudioNode; output: AudioNode } | null = null;
+        if (fx.kind === 'eq' && fx.params && 'bands' in fx.params) {
+          stage = buildTrackEqChain(ctx, DRUM_RACK_FX_KEY, DRUM_RACK_FX_KEY, (fx.params as EqParams).bands as any, fx.bypassed);
+        } else if (fx.kind === 'comp' && fx.params && 'threshold' in fx.params) {
+          stage = buildTrackCompChain(ctx, DRUM_RACK_FX_KEY, DRUM_RACK_FX_KEY, fx.params as CompParams, fx.bypassed);
+        }
+        if (!stage) continue;
+        if (!firstInput) firstInput = stage.input;
+        if (cursor) cursor.connect(stage.input);
+        cursor = stage.output;
+      } catch (err) {
+        if (typeof console !== 'undefined') console.warn('[audioStore] drum bus FX build failed for', fx.kind, err);
+      }
+    }
+    if (firstInput && cursor) {
+      wireDrumBusOutput({ input: firstInput, output: cursor });
+    } else {
+      wireDrumBusOutput(null);
+    }
+  } catch { /* audio not initialised yet — wireDrumBusOutput re-init is a no-op */ }
+}
+
 // Hot-rewire on FX add / remove. effectsStore fires `ghost-fx-rewire`
 // whenever the chain shape changes — we seek to the current position
 // to force startAllSources to rebuild with the new chain. Sub-millisecond
 // click is the trade-off for hot add/remove of effects mid-playback.
 if (typeof window !== 'undefined') {
   window.addEventListener('ghost-fx-rewire', () => {
+    rebuildDrumBusFx();
     const s = useAudioStore.getState();
     if (!s.isPlaying) return;
     s.seekTo(s.currentTime);

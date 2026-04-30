@@ -4,6 +4,7 @@ import { useProjectStore } from '../../stores/projectStore';
 import Waveform from '../tracks/Waveform';
 import { samplePreview } from '../../lib/samplePreview';
 import EffectChainEditor from './EffectChainEditor';
+import { DRUM_RACK_FX_KEY, useEffectsStore } from '../../stores/effectsStore';
 
 // Bottom sample editor / clip inspector. Mounts at the bottom of the
 // arrangement view; shows when exactly one clip is selected. Big waveform,
@@ -65,10 +66,14 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
     return true;
   };
 
-  // Master-bus rack removed — per-track EQ + Comp on the chain
-  // editor cover that workflow now. We still acknowledge a bus
-  // selection by suppressing the noisy "click a clip" empty state,
-  // and just render nothing while it's active.
+  // Drum rack as a group: clicking the rack header sets selectedBusId
+  // to DRUM_RACK_FX_KEY. Render the chain editor for that key so the
+  // user can edit the rack's EQ/Comp the same way they edit per-track
+  // chains. Master-bus rack itself was removed; any other bus value
+  // collapses to the empty state.
+  if (selectedBusId === DRUM_RACK_FX_KEY) {
+    return <DrumRackFxView />;
+  }
   if (selectedBusId) {
     return null;
   }
@@ -245,6 +250,36 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
       </div>
     </div>
     </>
+  );
+}
+
+// Standalone view shown when the user clicks the drum-rack header to
+// edit its group effects. Renders the chain editor for the rack's
+// special key, plus a placeholder when the chain is still empty so
+// the user knows to drag effects in.
+function DrumRackFxView() {
+  return (
+    <div className="shrink-0 mt-2">
+      <div className="px-3 py-1 text-[10.5px] font-bold tracking-[0.15em] uppercase text-purple-300/80">
+        Drum Rack FX
+      </div>
+      <EffectChainEditor laneKey={DRUM_RACK_FX_KEY} />
+      <DrumRackEmptyHint />
+    </div>
+  );
+}
+
+function DrumRackEmptyHint() {
+  // Subscribe to byProject so the hint disappears the moment a chain
+  // gets a first effect.
+  const byProject = useEffectsStore((s) => s.byProject);
+  void byProject;
+  const chain = useEffectsStore((s) => s.getChain(DRUM_RACK_FX_KEY));
+  if (chain && chain.length > 0) return null;
+  return (
+    <div className="shrink-0 h-[112px] mt-1 rounded-2xl glass flex items-center justify-center text-[11px] text-white/30 italic px-4 text-center">
+      Drag EQ or Comp from the sidebar onto the drum rack lane to add group effects.
+    </div>
   );
 }
 

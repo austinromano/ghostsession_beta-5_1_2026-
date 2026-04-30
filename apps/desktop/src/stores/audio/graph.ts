@@ -399,6 +399,33 @@ export function getDrumAnalyser(): AnalyserNode {
   return drumAnalyser!;
 }
 
+/**
+ * Rebuild the drum-bus output path with whatever effect chain the
+ * caller has assembled. Caller passes the input/output of the chain
+ * (or null if the chain is empty) and we splice it between drumBus
+ * and the mixer. drumAnalyser is reconnected as a parallel tap so
+ * the per-rack level meter keeps reading the same pre-FX signal.
+ *
+ * Calling with chain=null wires drumBus → mixerBus directly (the
+ * default state). Idempotent — safe to call repeatedly.
+ */
+export function wireDrumBusOutput(chain: { input: AudioNode; output: AudioNode } | null): void {
+  if (!drumBus || !mixerBus || !drumAnalyser) init();
+  if (!drumBus || !mixerBus || !drumAnalyser) return;
+  // Disconnect every prior outbound edge from drumBus and rebuild
+  // from scratch. drumBus.disconnect() drops mixerBus + analyser +
+  // any old chain input, all in one call.
+  try { drumBus.disconnect(); } catch { /* ignore */ }
+  if (chain) {
+    drumBus.connect(chain.input);
+    chain.output.connect(mixerBus);
+  } else {
+    drumBus.connect(mixerBus);
+  }
+  // Parallel meter tap — restore so the lane meter keeps reading.
+  drumBus.connect(drumAnalyser);
+}
+
 export function getAnalyser(): AnalyserNode {
   // Force init so the master meter has something to tap even before the
   // first track loads — otherwise the meter mounts, sees `null`, bails

@@ -112,6 +112,15 @@ export const EFFECT_HUE: Record<EffectKind, number> = {
 export const EFFECT_DRAG_MIME = 'application/x-ghost-effect';
 
 /**
+ * Sentinel key used by the drum rack as a "group" target for effects.
+ * Effects dropped on the drum rack lane store under this key, and the
+ * audio graph splices the corresponding chain between drumBus and the
+ * mixer so the entire rack flows through it as one signal — same
+ * behavior as a group/bus on a regular DAW.
+ */
+export const DRUM_RACK_FX_KEY = '__drum_rack__';
+
+/**
  * The arrangement groups clips by `fileId` (same source = same lane).
  * Effects are a property of the LANE, not an individual clip — this
  * helper picks the right key from a track-shaped object so every reader
@@ -186,17 +195,24 @@ export const useEffectsStore = create<EffectsState>((set, get) => ({
   setProject: (projectId) => {
     if (!projectId) {
       set({ currentProjectId: null });
+      // Tear down the drum-rack chain when leaving a project so its
+      // graph nodes don't leak into the next session.
+      fireRewire();
       return;
     }
     const existing = get().byProject.get(projectId);
     if (existing) {
       set({ currentProjectId: projectId });
+      fireRewire();
       return;
     }
     const hydrated = hydrateProject(projectId);
     const next = new Map(get().byProject);
     next.set(projectId, hydrated);
     set({ byProject: next, currentProjectId: projectId });
+    // Newly-hydrated chains need the drum-bus DSP rewired so any
+    // persisted drum-rack EQ/Comp lights up.
+    fireRewire();
   },
 
   getChain: (trackId) => {

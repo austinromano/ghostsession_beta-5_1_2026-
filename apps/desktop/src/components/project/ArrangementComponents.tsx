@@ -11,7 +11,7 @@ import Avatar from '../common/Avatar';
 import { useDrumRack, getRowAnalyser } from '../../stores/drumRackStore';
 import { getDrumAnalyser } from '../../stores/audio/graph';
 import { SAMPLE_LIBRARY_DRAG_MIME } from '../layout/SampleLibrarySection';
-import { useEffectsStore, EFFECT_DRAG_MIME, EFFECT_HUE, laneKeyOf, type EffectKind } from '../../stores/effectsStore';
+import { useEffectsStore, EFFECT_DRAG_MIME, EFFECT_HUE, DRUM_RACK_FX_KEY, laneKeyOf, type EffectKind } from '../../stores/effectsStore';
 
 type Member = { userId: string; displayName: string; avatarUrl: string | null };
 
@@ -251,6 +251,7 @@ function TrackHeader({ name, hue, isSelected, trackIds, laneKey, meter, controls
       <span className="text-[11px] font-semibold text-white/95 truncate flex-1" style={{ textShadow: '0 1px 2px rgba(0,0,0,0.5)' }}>
         {cleanName}
       </span>
+      {laneKey && <HeaderEffectChips laneKey={laneKey} />}
       <span
         className="shrink-0 w-1.5 h-1.5 rounded-full"
         style={{ background: accent, boxShadow: `0 0 4px ${accent}` }}
@@ -1184,6 +1185,50 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
     setOpen(true);
   };
 
+  // Effect-drop target for the drum rack — group-style. Drops land on
+  // DRUM_RACK_FX_KEY so the chain wires between drumBus and the mixer
+  // and processes the entire rack as one signal.
+  const [fxDragOver, setFxDragOver] = useState(false);
+  const isEffectDrag = (dt: DataTransfer) => {
+    for (const t of Array.from(dt.types)) if (t === EFFECT_DRAG_MIME) return true;
+    return false;
+  };
+  const onFxDragOver = (e: React.DragEvent) => {
+    if (!isEffectDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!fxDragOver) setFxDragOver(true);
+  };
+  const onFxDragLeave = (e: React.DragEvent) => {
+    if (!isEffectDrag(e.dataTransfer)) return;
+    setFxDragOver(false);
+  };
+  const onFxDrop = (e: React.DragEvent) => {
+    if (!isEffectDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFxDragOver(false);
+    try {
+      const raw = e.dataTransfer.getData(EFFECT_DRAG_MIME);
+      const payload = JSON.parse(raw) as { kind: EffectKind };
+      if (!payload?.kind) return;
+      useEffectsStore.getState().add(DRUM_RACK_FX_KEY, payload.kind);
+    } catch { /* malformed — ignore */ }
+  };
+
+  // Click-to-select the drum rack as the FX-edit context. Mirrors the
+  // master bus pattern via setSelectedBusId so SampleEditorPanel can
+  // open the chain editor for DRUM_RACK_FX_KEY.
+  const setSelectedBusId = useAudioStore((s) => s.setSelectedBusId);
+  const setSelectedTrackIds = useAudioStore((s) => s.setSelectedTrackIds);
+  const selectDrumRackForFx = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    if ((e.target as HTMLElement).closest('button')) return;
+    setSelectedTrackIds([]);
+    setSelectedBusId(DRUM_RACK_FX_KEY);
+  };
+
   return (
     <Reorder.Item
       value={DRUM_RACK_LANE_KEY}
@@ -1193,6 +1238,10 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
       whileDrag={{ scale: 1.005, zIndex: 50, boxShadow: '0 8px 24px rgba(0,0,0,0.5)' }}
       transition={{ duration: 0.15 }}
       as="div"
+      onDragOver={onFxDragOver}
+      onDragEnter={onFxDragOver}
+      onDragLeave={onFxDragLeave}
+      onDrop={onFxDrop}
     >
       <div className="flex relative" style={{ height: laneHeight }}>
         <div
@@ -1205,9 +1254,10 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
             e.preventDefault();
             dragControls.start(e);
           }}
+          onClick={selectDrumRackForFx}
           className="h-full flex shrink-0 relative cursor-grab active:cursor-grabbing"
         >
-          <TrackHeader name="Drum Rack" hue={hue} trackIds={[]} meter={<DrumRackLevelMeter />} />
+          <TrackHeader name="Drum Rack" hue={hue} trackIds={[]} laneKey={DRUM_RACK_FX_KEY} meter={<DrumRackLevelMeter />} />
           {/* Expand / collapse toggle — opens per-row sub-lanes below. */}
           <button
             onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
@@ -1246,6 +1296,23 @@ function DrumRackLanes({ laneHeight }: { laneHeight: number }) {
           }}
           title="Click empty space to add a clip"
         >
+          {fxDragOver && (
+            <div
+              className="absolute inset-0 pointer-events-none rounded-r-lg flex items-center justify-center"
+              style={{
+                background: 'rgba(168, 85, 247, 0.10)',
+                boxShadow: 'inset 0 0 0 2px rgba(168, 85, 247, 0.55)',
+                zIndex: 5,
+              }}
+            >
+              <span
+                className="text-[11px] font-bold tracking-wider uppercase text-white px-2 py-1 rounded-md"
+                style={{ background: 'rgba(168, 85, 247, 0.35)', backdropFilter: 'blur(4px)' }}
+              >
+                Drop to add to drum rack
+              </span>
+            </div>
+          )}
           {clips.map((clip) => (
             <DrumClipBlock
               key={clip.id}
