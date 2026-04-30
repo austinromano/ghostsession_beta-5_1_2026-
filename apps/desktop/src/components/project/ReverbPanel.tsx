@@ -35,7 +35,7 @@ const ACCENT = '#a855f7';
 // Sized to match ChannelEqPanel + CompressorPanel so all three plugins
 // align in the chain rail. Width tuned so the iso-stack visualization
 // reads with the same room-y proportion as the reference image.
-const PANEL_W = 460;
+const PANEL_W = 500;
 const PANEL_H = 252;
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -190,7 +190,7 @@ export default function ReverbPanel({
               an equal-width flex-1 slot so the longer labels (DAMPING)
               never bump the right divider regardless of label width. */}
           <div
-            className="flex items-center px-4 pt-1 pb-2 border-t"
+            className="flex items-center px-6 pt-1 pb-2 border-t"
             style={{ borderColor: 'rgba(255,255,255,0.05)', flex: 1 }}
           >
             <div className="flex-1 flex justify-center min-w-0">
@@ -667,7 +667,7 @@ function Knob({ label, valueLabel, value, min, max, onChange, large = false, com
   // instead of three values floating between groups.
   return (
     <div className="flex flex-col items-center select-none">
-      {!large && <span className="text-[9.5px] uppercase tracking-wider text-white/55 leading-none mb-[3px]">{label}</span>}
+      {!large && <span className="text-[9.5px] uppercase text-white/55 leading-none mb-[3px]" style={{ letterSpacing: '0.03em' }}>{label}</span>}
       <div
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
