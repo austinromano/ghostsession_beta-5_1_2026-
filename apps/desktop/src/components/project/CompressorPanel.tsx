@@ -523,8 +523,27 @@ export default function CompressorPanel({
         </div>
       </div>
 
-      {/* Knob row — Attack / Release / Makeup. Drag vertically. */}
-      <div className="flex items-center justify-around px-3 pt-1 pb-2">
+      {/* Knob row — Threshold / Ratio / Attack / Release / Makeup.
+          Drag vertically. Threshold + Ratio also live as draggable
+          knees on the transfer curve above; both controls bind to
+          the same store field. */}
+      <div className="flex items-center justify-around px-2 pt-1 pb-2">
+        <Knob
+          label={formatThreshold(threshold)}
+          caption="Thresh"
+          value={threshold}
+          min={DB_MIN}
+          max={DB_MAX}
+          onChange={(v) => setCompParam(laneKey, effect.id, 'threshold', v)}
+        />
+        <Knob
+          label={formatRatio(ratio)}
+          caption="Ratio"
+          value={ratio}
+          min={RATIO_MIN}
+          max={RATIO_MAX}
+          onChange={(v) => setCompParam(laneKey, effect.id, 'ratio', v)}
+        />
         <Knob
           label={formatMs(attack)}
           caption="Attack"
