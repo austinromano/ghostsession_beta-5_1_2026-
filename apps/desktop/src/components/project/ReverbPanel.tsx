@@ -144,7 +144,7 @@ export default function ReverbPanel({
       <div className="flex" style={{ height: PANEL_H - 36 }}>
         {/* Left column */}
         <div className="flex flex-col flex-1 min-w-0">
-          <div className="flex px-3 pt-2 pb-1" style={{ height: 130 }}>
+          <div className="flex px-1 pt-2 pb-1" style={{ height: 130 }}>
             <RoomVisualizer size={size} decay={decay} mix={mix} />
           </div>
           {/* Bottom knob row — Mix / Time / Damping. */}
@@ -213,7 +213,10 @@ export default function ReverbPanel({
 // reverb fades back into the floor. Framer Motion animates layer
 // transitions when params change.
 function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix: number }) {
-  const VIEW_W = 280;
+  // Wider viewBox so the SVG fills the body-row width without
+  // preserveAspectRatio="meet" creating big letterbox bars on the
+  // sides. cx auto-recenters, so layer geometry stays correct.
+  const VIEW_W = 380;
   const VIEW_H = 140;
   const cx = VIEW_W / 2;
   // Base diamond is centred so its bottom edge stays inside the
