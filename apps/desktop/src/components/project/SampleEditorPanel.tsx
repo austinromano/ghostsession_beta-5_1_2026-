@@ -25,6 +25,13 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
   const selectedBusId = useAudioStore((s) => s.selectedBusId);
   const currentProject = useProjectStore((s) => s.currentProject);
+  // Re-render trigger for chain shape changes — used to drive the
+  // divider visibility in the merged card. Subscribing at the top of
+  // the component keeps the hooks-order invariant React enforces;
+  // calling this AFTER one of the early returns below caused
+  // "Rendered more hooks than during the previous render" (#310).
+  const effectsByProject = useEffectsStore((s) => s.byProject);
+  void effectsByProject;
 
   // The panel operates on the WHOLE selection. Single click = one clip;
   // multi-select = same controls apply to every selected clip at once.
@@ -129,7 +136,10 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   // The chain editor and the per-clip controls share one card now.
   // Chain panels (EQ + Comp) render first, then a divider, then the
   // file-info / waveform / sliders block.
-  const hasChain = useEffectsStore((s) => s.getChain(trackId).length > 0);
+  // Read the chain via the store's static getter — `effectsByProject`
+  // above is the React-tracked dep, so this stays in sync without
+  // adding a second hook below the early returns.
+  const hasChain = useEffectsStore.getState().getChain(trackId).length > 0;
   return (
     <div className="shrink-0 mt-2 rounded-2xl glass flex overflow-x-auto items-stretch" style={{ minHeight: 140 }}>
       {/* Per-clip FX chain — each track's effects only affect its own
