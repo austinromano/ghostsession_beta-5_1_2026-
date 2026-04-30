@@ -27,7 +27,10 @@ export default function UserVoiceBar({ onSettings }: { onSettings?: () => void }
 
   const inSession = !!currentProjectId;
   const status = micError ? 'Mic blocked' : inSession ? 'In session' : 'Invisible';
-  const points = user?.points ?? 0;
+  // Demo placeholder so the chip doesn't read "0" while the earning
+  // rules are still being designed. Real value takes over the moment
+  // user.points goes non-zero.
+  const points = (user?.points ?? 0) || 1250;
   const isPro = user?.tier === 'pro';
   const formattedPoints = points.toLocaleString();
 
