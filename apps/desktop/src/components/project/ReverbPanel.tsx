@@ -32,8 +32,9 @@ import {
 
 const ACCENT = '#a855f7';
 // Sized to match ChannelEqPanel + CompressorPanel so all three plugins
-// align in the chain rail.
-const PANEL_W = 420;
+// align in the chain rail. Width tuned so the iso-stack visualization
+// reads with the same room-y proportion as the reference image.
+const PANEL_W = 460;
 const PANEL_H = 252;
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -193,30 +194,36 @@ export default function ReverbPanel({
 // reverb fades back into the floor. Framer Motion animates layer
 // transitions when params change.
 function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix: number }) {
-  const VIEW_W = 220;
-  const VIEW_H = 130;
+  const VIEW_W = 280;
+  const VIEW_H = 140;
   const cx = VIEW_W / 2;
-  const baseY = VIEW_H * 0.80;
-  // Number of layers and base half-widths. Bigger size pushes the
-  // base layer outward; decay raises the whole stack.
+  const baseY = VIEW_H * 0.84;
+
+  // Five floating layers — the bottom three form the main "room"
+  // step-pyramid; the top two render as faint dashed wireframes that
+  // suggest the open ceiling space, matching the reference image.
   const layers = useMemo(() => {
-    const n = 4;
-    const out: Array<{ halfW: number; halfH: number; y: number; opacity: number }> = [];
-    const baseHalfW = 28 + size * 56;        // 28..84
+    const n = 5;
+    const out: Array<{ halfW: number; halfH: number; y: number; fillOpacity: number; strokeOpacity: number; wireframe: boolean }> = [];
+    const baseHalfW = 36 + size * 70;        // 36..106
     const baseHalfH = baseHalfW * 0.42;
-    const vertSpacing = 8 + decay * 12;      // 8..20
+    const vertSpacing = 8 + decay * 14;      // 8..22
+    // Layer 0 = base (largest, brightest); layers grow smaller and
+    // climb upward.
     for (let i = 0; i < n; i++) {
-      const t = i / (n - 1);
-      const halfW = baseHalfW * (1 - t * 0.65);
-      const halfH = baseHalfH * (1 - t * 0.65);
+      const t = i / (n - 1);                 // 0..1 from base to top
+      const halfW = baseHalfW * (1 - t * 0.78);
+      const halfH = baseHalfH * (1 - t * 0.78);
       const y = baseY - i * vertSpacing;
-      out.push({ halfW, halfH, y, opacity: 0.18 + (1 - t) * 0.45 });
+      const wireframe = i >= 3;              // top two layers
+      const fillOpacity = wireframe ? 0 : (0.25 + (1 - t) * 0.35);
+      const strokeOpacity = wireframe ? 0.22 + (1 - t) * 0.18 : 0.45 + (1 - t) * 0.20;
+      out.push({ halfW, halfH, y, fillOpacity, strokeOpacity, wireframe });
     }
     return out;
   }, [size, decay]);
 
-  // dB scale on left (visual only), ms scale on right.
-  const dBLabels = ['+10', '0', '-10', '-20', '-30'];
+  const dBLabels = ['+20', '+10', '0', '-10', '-20', '-30'];
   const msLabels = ['0', '10', '20', '30'];
 
   return (
@@ -224,66 +231,101 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
       <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width="100%" height={VIEW_H} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
         <defs>
           <linearGradient id="roomTopGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#c084fc" stopOpacity="0.85" />
+            <stop offset="0%" stopColor="#d8b4fe" stopOpacity="0.95" />
             <stop offset="100%" stopColor={ACCENT} stopOpacity="0.55" />
           </linearGradient>
           <linearGradient id="roomLeftGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.45" />
-            <stop offset="100%" stopColor="#581c87" stopOpacity="0.35" />
+            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.55" />
+            <stop offset="100%" stopColor="#4c1d95" stopOpacity="0.30" />
           </linearGradient>
           <linearGradient id="roomRightGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="#581c87" stopOpacity="0.30" />
-            <stop offset="100%" stopColor={ACCENT} stopOpacity="0.20" />
+            <stop offset="0%" stopColor="#4c1d95" stopOpacity="0.28" />
+            <stop offset="100%" stopColor={ACCENT} stopOpacity="0.18" />
           </linearGradient>
-          <linearGradient id="roomGlowGrad" cx="0.5" cy="1" r="0.7">
-            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.30" />
+          <radialGradient id="roomGlowGrad" cx="0.5" cy="1" r="0.7">
+            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.50" />
             <stop offset="100%" stopColor={ACCENT} stopOpacity="0" />
-          </linearGradient>
+          </radialGradient>
         </defs>
 
-        {/* Faint ambient floor glow */}
-        <ellipse cx={cx} cy={baseY + 8} rx={150} ry={20} fill="url(#roomGlowGrad)" opacity={0.6 * mix + 0.2} />
+        {/* Soft ambient floor glow under the base */}
+        <ellipse
+          cx={cx} cy={baseY + 8}
+          rx={(layers[0]?.halfW ?? 80) * 1.5}
+          ry={20}
+          fill="url(#roomGlowGrad)"
+          opacity={0.5 * mix + 0.18}
+        />
 
-        {/* Floor plane outline (the largest base) — drawn slightly
-            transparent regardless of layer count so the room reads
-            as sitting on a floor. */}
-        <PerspectivePlane cx={cx} y={baseY + 6} halfW={layers[0]?.halfW ?? 80} halfH={(layers[0]?.halfH ?? 30) * 1.05} fillTop="rgba(168,85,247,0.10)" fillLeft="transparent" fillRight="transparent" stroke="rgba(168,134,255,0.20)" />
-
-        {/* Stacked iso boxes from bottom up. We use Framer Motion's
-            <motion.g> so size + decay changes animate smoothly. */}
-        {layers.map((layer, i) => (
-          <motion.g
-            key={`layer-${i}`}
-            animate={{ opacity: layer.opacity * (0.3 + 0.7 * mix) }}
-            transition={{ type: 'spring', stiffness: 180, damping: 22 }}
-          >
-            <PerspectivePlane
-              cx={cx}
-              y={layer.y}
-              halfW={layer.halfW}
-              halfH={layer.halfH}
-              fillTop="url(#roomTopGrad)"
-              fillLeft="url(#roomLeftGrad)"
-              fillRight="url(#roomRightGrad)"
-              stroke="rgba(232,213,255,0.30)"
-              showSides={i > 0}
-              sideHeight={i === layers.length - 1 ? 0 : (layers[i + 1]?.y ?? layer.y) - layer.y}
+        {/* Vertical perspective struts from the top wireframe down to
+            the base — connect the four iso corners through every
+            layer to read as a transparent box. */}
+        {(() => {
+          const top = layers[layers.length - 1];
+          const bot = layers[0];
+          if (!top || !bot) return null;
+          const struts = [
+            { x1: cx - top.halfW, y1: top.y, x2: cx - bot.halfW, y2: bot.y },
+            { x1: cx + top.halfW, y1: top.y, x2: cx + bot.halfW, y2: bot.y },
+            { x1: cx, y1: top.y - top.halfH, x2: cx, y2: bot.y - bot.halfH },
+            { x1: cx, y1: top.y + top.halfH, x2: cx, y2: bot.y + bot.halfH },
+          ];
+          return struts.map((s, i) => (
+            <line
+              key={`strut-${i}`}
+              x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
+              stroke="rgba(168, 134, 255, 0.16)"
+              strokeWidth={0.6}
+              strokeDasharray="2 3"
             />
-          </motion.g>
-        ))}
+          ));
+        })()}
 
-        {/* Y-axis labels (left = dB) */}
-        {dBLabels.map((label, i) => {
-          const y = 22 + (i / (dBLabels.length - 1)) * (VIEW_H - 50);
+        {/* Stacked layers, base → top. <motion.g> animates layer
+            transitions when params change. */}
+        {layers.map((layer, i) => {
+          const fillTop = layer.wireframe ? 'transparent' : 'url(#roomTopGrad)';
+          const fillLeft = layer.wireframe ? 'transparent' : 'url(#roomLeftGrad)';
+          const fillRight = layer.wireframe ? 'transparent' : 'url(#roomRightGrad)';
+          const stroke = layer.wireframe
+            ? `rgba(168, 134, 255, ${layer.strokeOpacity})`
+            : `rgba(232, 213, 255, ${layer.strokeOpacity})`;
+          const dash = layer.wireframe ? '2 3' : undefined;
           return (
-            <text key={`db-${i}`} x={2} y={y} fill="rgba(255,255,255,0.40)" fontSize={7.5} fontFamily="monospace">{label}</text>
+            <motion.g
+              key={`layer-${i}`}
+              animate={{ opacity: (layer.wireframe ? 1 : layer.fillOpacity / 0.6) * (0.35 + 0.65 * mix) }}
+              transition={{ type: 'spring', stiffness: 180, damping: 22 }}
+            >
+              <PerspectivePlane
+                cx={cx}
+                y={layer.y}
+                halfW={layer.halfW}
+                halfH={layer.halfH}
+                fillTop={fillTop}
+                fillLeft={fillLeft}
+                fillRight={fillRight}
+                stroke={stroke}
+                strokeDasharray={dash}
+                showSides={!layer.wireframe && i > 0}
+                sideHeight={i === layers.length - 1 ? 0 : (layers[i + 1]?.y ?? layer.y) - layer.y}
+              />
+            </motion.g>
           );
         })}
-        {/* Y-axis labels (right = ms) */}
-        {msLabels.map((label, i) => {
-          const y = 26 + (i / (msLabels.length - 1)) * (VIEW_H - 60);
+
+        {/* Y-axis labels — left = dB scale */}
+        {dBLabels.map((label, i) => {
+          const y = 16 + (i / (dBLabels.length - 1)) * (VIEW_H - 30);
           return (
-            <text key={`ms-${i}`} x={VIEW_W - 14} y={y} fill="rgba(255,255,255,0.40)" fontSize={7.5} fontFamily="monospace">{label}</text>
+            <text key={`db-${i}`} x={2} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace">{label}</text>
+          );
+        })}
+        {/* Y-axis labels — right = ms scale */}
+        {msLabels.map((label, i) => {
+          const y = 22 + (i / (msLabels.length - 1)) * (VIEW_H - 40);
+          return (
+            <text key={`ms-${i}`} x={VIEW_W - 14} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="start">{label}</text>
           );
         })}
       </svg>
@@ -296,10 +338,12 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
 function PerspectivePlane({
   cx, y, halfW, halfH,
   fillTop, fillLeft, fillRight, stroke,
+  strokeDasharray,
   showSides = false, sideHeight = 0,
 }: {
   cx: number; y: number; halfW: number; halfH: number;
   fillTop: string; fillLeft: string; fillRight: string; stroke: string;
+  strokeDasharray?: string;
   showSides?: boolean; sideHeight?: number;
 }) {
   // Iso top face — diamond shape
@@ -314,9 +358,9 @@ function PerspectivePlane({
     : '';
   return (
     <g>
-      {leftPath && <path d={leftPath} fill={fillLeft} stroke={stroke} strokeWidth={0.5} />}
-      {rightPath && <path d={rightPath} fill={fillRight} stroke={stroke} strokeWidth={0.5} />}
-      <path d={topPath} fill={fillTop} stroke={stroke} strokeWidth={0.8} />
+      {leftPath && <path d={leftPath} fill={fillLeft} stroke={stroke} strokeWidth={0.5} strokeDasharray={strokeDasharray} />}
+      {rightPath && <path d={rightPath} fill={fillRight} stroke={stroke} strokeWidth={0.5} strokeDasharray={strokeDasharray} />}
+      <path d={topPath} fill={fillTop} stroke={stroke} strokeWidth={0.8} strokeDasharray={strokeDasharray} />
     </g>
   );
 }
