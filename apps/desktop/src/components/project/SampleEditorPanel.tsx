@@ -23,11 +23,6 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackWarp = useAudioStore((s) => s.setTrackWarp);
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
   const selectedBusId = useAudioStore((s) => s.selectedBusId);
-  const busFx = useAudioStore((s) => s.busFx);
-  const setBusEq = useAudioStore((s) => s.setBusEq);
-  const setBusComp = useAudioStore((s) => s.setBusComp);
-  const setBusReverbWet = useAudioStore((s) => s.setBusReverbWet);
-  const setBusReverbDecay = useAudioStore((s) => s.setBusReverbDecay);
   const currentProject = useProjectStore((s) => s.currentProject);
 
   // The panel operates on the WHOLE selection. Single click = one clip;
@@ -70,21 +65,12 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
     return true;
   };
 
-  // Bus FX panel — when the user clicks the master bus lane, render the
-  // channel strip horizontally (EQ → Comp → Reverb) instead of clip
-  // controls. This is the "click the bus track and the FX line up from
-  // left to right" surface.
+  // Master-bus rack removed — per-track EQ + Comp on the chain
+  // editor cover that workflow now. We still acknowledge a bus
+  // selection by suppressing the noisy "click a clip" empty state,
+  // and just render nothing while it's active.
   if (selectedBusId) {
-    return <BusFxPanel
-      eq={busFx.eq}
-      comp={busFx.comp}
-      reverbWet={busFx.reverbWet}
-      reverbDecay={busFx.reverbDecay}
-      onEq={setBusEq}
-      onComp={setBusComp}
-      onReverbWet={setBusReverbWet}
-      onReverbDecay={setBusReverbDecay}
-    />;
+    return null;
   }
 
   if (!trackId || !projectTrack) {
@@ -255,99 +241,10 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         />
         <div className="text-[9px] text-white/30 italic mt-2 leading-tight">
           Drag EQ / Comp / Reverb from the sidebar onto a track to build a per-track chain.
-          Master-bus FX still live on the bus — click it to edit.
         </div>
       </div>
     </div>
     </>
-  );
-}
-
-/**
- * Master FX bus channel-strip — EQ → Comp → Reverb laid out left-to-right.
- * Each section is its own column so all the knobs are visible at once
- * (rather than the per-clip vertical stack). The bus state mirrors the
- * live ConvolverNode / BiquadFilters / compressor worklet, so dragging
- * a slider takes effect on the next render quantum.
- */
-function BusFxPanel({
-  eq, comp, reverbWet, reverbDecay,
-  onEq, onComp, onReverbWet, onReverbDecay,
-}: {
-  eq: { low: number; mid: number; high: number };
-  comp: { threshold: number; ratio: number; makeup: number };
-  reverbWet: number;
-  reverbDecay: number;
-  onEq: (band: 'low' | 'mid' | 'high', dB: number) => void;
-  onComp: (field: 'threshold' | 'ratio' | 'makeup', v: number) => void;
-  onReverbWet: (v: number) => void;
-  onReverbDecay: (v: number) => void;
-}) {
-  return (
-    <div className="shrink-0 h-[200px] mt-2 rounded-2xl glass flex overflow-hidden">
-      {/* Header column — bus identity, sits where the file-info column
-          sits in the per-clip view so the layout reads consistently. */}
-      <div className="shrink-0 w-[180px] flex flex-col gap-2 px-3 py-3 border-r border-white/[0.05]">
-        <div className="flex items-center gap-2">
-          <span className="w-1.5 h-1.5 rounded-full" style={{ background: '#a855f7', boxShadow: '0 0 6px #a855f7' }} />
-          <span className="text-[12px] font-semibold text-white/90 uppercase tracking-wider">Master Bus</span>
-        </div>
-        <div className="text-[10px] text-white/45 leading-snug">
-          EQ → Compressor → Reverb. Every track that routes through the bus is processed by this chain.
-        </div>
-      </div>
-      {/* FX racks, left → right */}
-      <div className="flex-1 min-w-0 flex gap-3 px-3 py-3 overflow-x-auto">
-        <FxRack title="EQ" accent="#3b82f6">
-          <Slider label="Lo" value={eq.low} min={-24} max={24} step={0.5} defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => onEq('low', v)} />
-          <Slider label="Md" value={eq.mid} min={-24} max={24} step={0.5} defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => onEq('mid', v)} />
-          <Slider label="Hi" value={eq.high} min={-24} max={24} step={0.5} defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => onEq('high', v)} />
-        </FxRack>
-        <FxRack title="Comp" accent="#22d3ee">
-          <Slider label="Th" value={comp.threshold} min={-60} max={0} step={0.5} defaultValue={0}
-            format={(v) => `${v.toFixed(1)} dB`}
-            onChange={(v) => onComp('threshold', v)} />
-          <Slider label="Rt" value={comp.ratio} min={1} max={20} step={0.1} defaultValue={1}
-            format={(v) => `${v.toFixed(1)}:1`}
-            onChange={(v) => onComp('ratio', v)} />
-          <Slider label="Mk" value={comp.makeup} min={-20} max={20} step={0.5} defaultValue={0}
-            format={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)} dB`}
-            onChange={(v) => onComp('makeup', v)} />
-        </FxRack>
-        <FxRack title="Reverb" accent="#a855f7">
-          <Slider label="Wet" value={reverbWet} min={0} max={1} step={0.01} defaultValue={0}
-            format={(v) => v < 0.005 ? 'off' : `${Math.round(v * 100)}%`}
-            onChange={onReverbWet} />
-          <Slider label="Decay" value={reverbDecay} min={0.1} max={6} step={0.05} defaultValue={1.8}
-            format={(v) => `${v.toFixed(2)} s`}
-            onChange={onReverbDecay} />
-        </FxRack>
-      </div>
-    </div>
-  );
-}
-
-function FxRack({ title, accent, children }: { title: string; accent: string; children: React.ReactNode }) {
-  return (
-    <div
-      className="shrink-0 w-[180px] rounded-lg flex flex-col gap-2 px-3 py-2"
-      style={{
-        background: 'rgba(255,255,255,0.02)',
-        border: '1px solid rgba(255,255,255,0.06)',
-      }}
-    >
-      <div className="flex items-center gap-1.5">
-        <span className="w-1 h-1 rounded-full" style={{ background: accent, boxShadow: `0 0 4px ${accent}` }} />
-        <span className="text-[10px] uppercase tracking-wider font-semibold" style={{ color: accent }}>{title}</span>
-      </div>
-      <div className="flex flex-col gap-1.5 flex-1">{children}</div>
-    </div>
   );
 }
 
