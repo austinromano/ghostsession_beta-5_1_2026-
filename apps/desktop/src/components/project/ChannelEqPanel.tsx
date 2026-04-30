@@ -243,6 +243,10 @@ export default function ChannelEqPanel({
       className="rounded-xl select-none"
       style={{
         width: VIEW_W + 24,
+        // Locked to PANEL_HEIGHT — CompressorPanel uses the same value
+        // so the two panels render at the same pixel height when they
+        // sit side-by-side in the chain rail.
+        height: 252,
         background: 'rgba(15, 12, 32, 0.92)',
         border: '1px solid rgba(168, 134, 255, 0.18)',
         boxShadow: '0 8px 24px rgba(0,0,0,0.4), inset 0 1px 0 rgba(255,255,255,0.04)',
