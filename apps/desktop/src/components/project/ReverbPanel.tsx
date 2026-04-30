@@ -352,10 +352,13 @@ function ParticleRoom({
       const fric = Math.exp(-p.damping * 3.5 * dt);  // friction (Damping)
       const decayPow = 1 + p.decay * 3.2;            // alpha-curve (Decay)
 
+      // Spawn particles from the iso-cube's base diamond so they
+      // emerge "from inside the room" instead of from the canvas floor.
+      // Match RoomLayer's baseY ratio (0.74 of viewport height).
+      const baseY = H * 0.74;
       for (let i = 0; i < toSpawn; i++) {
-        // Spawn from a thin band near the floor, biased to the centre.
-        const sx = W * 0.5 + (Math.random() - 0.5) * W * 0.55;
-        const sy = H * 0.92;
+        const sx = W * 0.5 + (Math.random() - 0.5) * W * 0.45;
+        const sy = baseY + 4;
         const angleSpread = (Math.random() - 0.5) * 1.6;  // -0.8..0.8 rad
         // Combine angled emission with the width-controlled horizontal
         // spread so width visibly changes the dispersion cone.
@@ -430,7 +433,162 @@ function ParticleRoom({
           background: 'linear-gradient(180deg, rgba(20,14,42,1) 0%, rgba(11,8,24,1) 100%)',
         }}
       />
+      {/* Iso-cube overlay sits on top of the canvas — wireframe room
+          containing the particles. Both react to the same params +
+          energy so the cube breathes while the particles disperse. */}
+      <div className="absolute inset-0 pointer-events-none">
+        <IsoRoom size={size} decay={decay} mix={mix} energy={energy} />
+      </div>
     </div>
+  );
+}
+
+// 3D isometric step-pyramid overlay. 5 floating diamonds — the bottom
+// 3 solid, the top 2 dashed wireframe — connected by perspective
+// struts. Layers pulse + the wireframe ceiling expands outward with
+// audio energy so the room "breathes" with the reverb tail.
+function IsoRoom({ size, decay, mix, energy }: { size: number; decay: number; mix: number; energy: number }) {
+  const VIEW_W = 380;
+  const VIEW_H = 140;
+  const cx = VIEW_W / 2;
+  const baseY = VIEW_H * 0.74;
+
+  const layers = useMemo(() => {
+    const n = 5;
+    const out: Array<{ halfW: number; halfH: number; y: number; fillOpacity: number; strokeOpacity: number; wireframe: boolean }> = [];
+    const baseHalfW = 50 + size * 90;
+    const baseHalfH = 14 + size * 16;
+    const vertSpacing = 12 + decay * 18;
+    for (let i = 0; i < n; i++) {
+      const t = i / (n - 1);
+      const halfW = baseHalfW * (1 - t * 0.78);
+      const halfH = baseHalfH * (1 - t * 0.78);
+      const y = baseY - i * vertSpacing;
+      const wireframe = i >= 3;
+      const fillOpacity = wireframe ? 0 : (0.25 + (1 - t) * 0.35);
+      const strokeOpacity = wireframe ? 0.22 + (1 - t) * 0.18 : 0.45 + (1 - t) * 0.20;
+      out.push({ halfW, halfH, y, fillOpacity, strokeOpacity, wireframe });
+    }
+    return out;
+  }, [size, decay]);
+
+  return (
+    <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width="100%" height="100%" preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
+      <defs>
+        <linearGradient id="roomTopGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#d8b4fe" stopOpacity="0.95" />
+          <stop offset="100%" stopColor={ACCENT} stopOpacity="0.55" />
+        </linearGradient>
+        <linearGradient id="roomLeftGrad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor={ACCENT} stopOpacity="0.55" />
+          <stop offset="100%" stopColor="#4c1d95" stopOpacity="0.30" />
+        </linearGradient>
+        <linearGradient id="roomRightGrad" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stopColor="#4c1d95" stopOpacity="0.28" />
+          <stop offset="100%" stopColor={ACCENT} stopOpacity="0.18" />
+        </linearGradient>
+        <radialGradient id="roomGlowGrad" cx="0.5" cy="1" r="0.7">
+          <stop offset="0%" stopColor={ACCENT} stopOpacity="0.50" />
+          <stop offset="100%" stopColor={ACCENT} stopOpacity="0" />
+        </radialGradient>
+      </defs>
+
+      <motion.ellipse
+        cx={cx} cy={baseY + 8}
+        rx={(layers[0]?.halfW ?? 80) * 1.5}
+        ry={20}
+        fill="url(#roomGlowGrad)"
+        animate={{ opacity: 0.5 * mix + 0.18 + energy * 0.55, scale: 1 + energy * 0.18 }}
+        transition={{ type: 'tween', duration: 0.08, ease: 'linear' }}
+        style={{ originX: '50%', originY: '100%' }}
+      />
+
+      {layers[0] && (
+        <motion.path
+          d={`M ${cx - layers[0].halfW} ${baseY} L ${cx} ${baseY - layers[0].halfH} L ${cx + layers[0].halfW} ${baseY} L ${cx} ${baseY + layers[0].halfH} Z`}
+          fill="none"
+          stroke={ACCENT}
+          strokeWidth={1.2}
+          animate={{ opacity: energy * 0.55, scale: 1 + energy * 0.45 }}
+          transition={{ type: 'tween', duration: 0.1, ease: 'easeOut' }}
+          style={{ originX: `${cx}px`, originY: `${baseY}px`, transformBox: 'fill-box' as any }}
+        />
+      )}
+
+      {(() => {
+        const top = layers[layers.length - 1];
+        const bot = layers[0];
+        if (!top || !bot) return null;
+        const struts = [
+          { x1: cx - top.halfW, y1: top.y, x2: cx - bot.halfW, y2: bot.y },
+          { x1: cx + top.halfW, y1: top.y, x2: cx + bot.halfW, y2: bot.y },
+          { x1: cx, y1: top.y - top.halfH, x2: cx, y2: bot.y - bot.halfH },
+          { x1: cx, y1: top.y + top.halfH, x2: cx, y2: bot.y + bot.halfH },
+        ];
+        return struts.map((s, i) => (
+          <line key={`strut-${i}`} x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
+            stroke="rgba(168, 134, 255, 0.16)" strokeWidth={0.6} strokeDasharray="2 3" />
+        ));
+      })()}
+
+      {layers.map((layer, i) => {
+        const fillTop = layer.wireframe ? 'transparent' : 'url(#roomTopGrad)';
+        const fillLeft = layer.wireframe ? 'transparent' : 'url(#roomLeftGrad)';
+        const fillRight = layer.wireframe ? 'transparent' : 'url(#roomRightGrad)';
+        const stroke = layer.wireframe
+          ? `rgba(168, 134, 255, ${layer.strokeOpacity})`
+          : `rgba(232, 213, 255, ${layer.strokeOpacity})`;
+        const dash = layer.wireframe ? '2 3' : undefined;
+        const t = i / Math.max(1, layers.length - 1);
+        const baseOpacity = (layer.wireframe ? 1 : layer.fillOpacity / 0.6) * (0.35 + 0.65 * mix);
+        const energyBoost = layer.wireframe ? energy * 0.55 : energy * 0.30;
+        const scale = 1 + (layer.wireframe ? energy * 0.22 * (0.6 + t) : energy * 0.06);
+        return (
+          <motion.g
+            key={`layer-${i}`}
+            animate={{ opacity: Math.min(1, baseOpacity + energyBoost), scale }}
+            transition={{ type: 'spring', stiffness: 220, damping: 20, mass: 0.6 }}
+            style={{ originX: `${cx}px`, originY: `${layer.y}px`, transformBox: 'fill-box' as any }}
+          >
+            <PerspectivePlane
+              cx={cx} y={layer.y} halfW={layer.halfW} halfH={layer.halfH}
+              fillTop={fillTop} fillLeft={fillLeft} fillRight={fillRight}
+              stroke={stroke} strokeDasharray={dash}
+              showSides={!layer.wireframe && i > 0}
+              sideHeight={i === layers.length - 1 ? 0 : (layers[i + 1]?.y ?? layer.y) - layer.y}
+            />
+          </motion.g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// One iso box top + optional left + right side faces.
+function PerspectivePlane({
+  cx, y, halfW, halfH,
+  fillTop, fillLeft, fillRight, stroke,
+  strokeDasharray,
+  showSides = false, sideHeight = 0,
+}: {
+  cx: number; y: number; halfW: number; halfH: number;
+  fillTop: string; fillLeft: string; fillRight: string; stroke: string;
+  strokeDasharray?: string;
+  showSides?: boolean; sideHeight?: number;
+}) {
+  const topPath = `M ${cx - halfW} ${y} L ${cx} ${y - halfH} L ${cx + halfW} ${y} L ${cx} ${y + halfH} Z`;
+  const leftPath = showSides && sideHeight > 0
+    ? `M ${cx - halfW} ${y} L ${cx} ${y + halfH} L ${cx} ${y + halfH + sideHeight} L ${cx - halfW} ${y + sideHeight} Z`
+    : '';
+  const rightPath = showSides && sideHeight > 0
+    ? `M ${cx + halfW} ${y} L ${cx} ${y + halfH} L ${cx} ${y + halfH + sideHeight} L ${cx + halfW} ${y + sideHeight} Z`
+    : '';
+  return (
+    <g>
+      {leftPath && <path d={leftPath} fill={fillLeft} stroke={stroke} strokeWidth={0.5} strokeDasharray={strokeDasharray} />}
+      {rightPath && <path d={rightPath} fill={fillRight} stroke={stroke} strokeWidth={0.5} strokeDasharray={strokeDasharray} />}
+      <path d={topPath} fill={fillTop} stroke={stroke} strokeWidth={0.8} strokeDasharray={strokeDasharray} />
+    </g>
   );
 }
 
