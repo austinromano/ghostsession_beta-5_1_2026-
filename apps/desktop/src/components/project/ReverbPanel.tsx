@@ -31,8 +31,10 @@ import {
 // `mix`, and `decay` shifts the stack's total height.
 
 const ACCENT = '#a855f7';
-const PANEL_W = 520;
-const PANEL_H = 400;
+// Sized to match ChannelEqPanel + CompressorPanel so all three plugins
+// align in the chain rail.
+const PANEL_W = 420;
+const PANEL_H = 252;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -133,17 +135,20 @@ export default function ReverbPanel({
         )}
       </div>
 
-      {/* Main row: visualization + Size/Decay column */}
-      <div className="flex gap-3 px-4 pt-3 pb-2" style={{ height: 240 }}>
+      {/* Main row: visualization + Size/Decay column. Tightened so
+          the panel fits 252 px total height. */}
+      <div className="flex gap-2 px-3 pt-2 pb-1" style={{ height: 130 }}>
         <RoomVisualizer size={size} decay={decay} mix={mix} />
-        <div className="flex flex-col items-center gap-3 shrink-0 pl-2 border-l" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+        <div className="flex flex-col items-center justify-center gap-1 shrink-0 pl-2 border-l" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
           <Knob
+            compact
             label="Size"
             valueLabel={formatPercent(size)}
             value={size} min={0} max={1}
             onChange={(v) => setReverbParam(laneKey, effect.id, 'size', v)}
           />
           <Knob
+            compact
             label="Decay"
             valueLabel={formatPercent(decay)}
             value={decay} min={0} max={1}
@@ -153,34 +158,30 @@ export default function ReverbPanel({
       </div>
 
       {/* Bottom knob row */}
-      <div className="flex items-center justify-around px-4 pt-2 pb-3 border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+      <div className="flex items-center justify-around px-3 pt-1 pb-2 border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
         <Knob
           label="Mix"
           valueLabel={formatPercent(mix)}
           value={mix} min={0} max={1}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'mix', v)}
-          large
         />
         <Knob
           label="Time"
           valueLabel={formatSeconds(time)}
           value={time} min={0.1} max={10}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'time', v)}
-          large
         />
         <Knob
           label="Damping"
           valueLabel={formatPercent(damping)}
           value={damping} min={0} max={1}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'damping', v)}
-          large
         />
         <Knob
           label="Width"
           valueLabel={formatPercent(width)}
           value={width} min={0} max={1}
           onChange={(v) => setReverbParam(laneKey, effect.id, 'width', v)}
-          large
         />
       </div>
     </div>
@@ -192,18 +193,18 @@ export default function ReverbPanel({
 // reverb fades back into the floor. Framer Motion animates layer
 // transitions when params change.
 function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix: number }) {
-  const VIEW_W = 280;
-  const VIEW_H = 220;
+  const VIEW_W = 220;
+  const VIEW_H = 130;
   const cx = VIEW_W / 2;
-  const baseY = VIEW_H * 0.78;
+  const baseY = VIEW_H * 0.80;
   // Number of layers and base half-widths. Bigger size pushes the
   // base layer outward; decay raises the whole stack.
   const layers = useMemo(() => {
     const n = 4;
     const out: Array<{ halfW: number; halfH: number; y: number; opacity: number }> = [];
-    const baseHalfW = 40 + size * 80;        // 40..120
-    const baseHalfH = baseHalfW * 0.4;
-    const vertSpacing = 14 + decay * 16;     // 14..30
+    const baseHalfW = 28 + size * 56;        // 28..84
+    const baseHalfH = baseHalfW * 0.42;
+    const vertSpacing = 8 + decay * 12;      // 8..20
     for (let i = 0; i < n; i++) {
       const t = i / (n - 1);
       const halfW = baseHalfW * (1 - t * 0.65);
@@ -215,12 +216,12 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
   }, [size, decay]);
 
   // dB scale on left (visual only), ms scale on right.
-  const dBLabels = ['+20', '+10', '0', '-10', '-20', '-30'];
+  const dBLabels = ['+10', '0', '-10', '-20', '-30'];
   const msLabels = ['0', '10', '20', '30'];
 
   return (
-    <div className="relative shrink-0" style={{ width: VIEW_W, height: VIEW_H }}>
-      <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width={VIEW_W} height={VIEW_H} style={{ display: 'block' }}>
+    <div className="relative shrink-0 grow" style={{ height: VIEW_H }}>
+      <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width="100%" height={VIEW_H} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
         <defs>
           <linearGradient id="roomTopGrad" x1="0" y1="0" x2="0" y2="1">
             <stop offset="0%" stopColor="#c084fc" stopOpacity="0.85" />
@@ -273,16 +274,16 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
 
         {/* Y-axis labels (left = dB) */}
         {dBLabels.map((label, i) => {
-          const y = 28 + (i / (dBLabels.length - 1)) * (VIEW_H - 60);
+          const y = 22 + (i / (dBLabels.length - 1)) * (VIEW_H - 50);
           return (
-            <text key={`db-${i}`} x={4} y={y} fill="rgba(255,255,255,0.40)" fontSize={9} fontFamily="monospace">{label}</text>
+            <text key={`db-${i}`} x={2} y={y} fill="rgba(255,255,255,0.40)" fontSize={7.5} fontFamily="monospace">{label}</text>
           );
         })}
         {/* Y-axis labels (right = ms) */}
         {msLabels.map((label, i) => {
-          const y = 32 + (i / (msLabels.length - 1)) * (VIEW_H - 70);
+          const y = 26 + (i / (msLabels.length - 1)) * (VIEW_H - 60);
           return (
-            <text key={`ms-${i}`} x={VIEW_W - 22} y={y} fill="rgba(255,255,255,0.40)" fontSize={9} fontFamily="monospace">{label}</text>
+            <text key={`ms-${i}`} x={VIEW_W - 14} y={y} fill="rgba(255,255,255,0.40)" fontSize={7.5} fontFamily="monospace">{label}</text>
           );
         })}
       </svg>
@@ -323,7 +324,7 @@ function PerspectivePlane({
 // Round purple knob — drag vertically to change. Same visual idiom as
 // CompressorPanel's knob; copied here so the reverb panel can size
 // independently (the reverb knobs are bigger).
-function Knob({ label, valueLabel, value, min, max, onChange, large = false }: {
+function Knob({ label, valueLabel, value, min, max, onChange, large = false, compact = false }: {
   label: string;
   valueLabel: string;
   value: number;
@@ -331,10 +332,11 @@ function Knob({ label, valueLabel, value, min, max, onChange, large = false }: {
   max: number;
   onChange: (v: number) => void;
   large?: boolean;
+  compact?: boolean;
 }) {
   const dragStartRef = useRef<{ y: number; v: number } | null>(null);
-  const SIZE = large ? 56 : 44;
-  const RADIUS = large ? 24 : 19;
+  const SIZE = large ? 56 : compact ? 36 : 44;
+  const RADIUS = large ? 24 : compact ? 14 : 19;
 
   const t = clamp((value - min) / (max - min), 0, 1);
   const startAngle = -135;
