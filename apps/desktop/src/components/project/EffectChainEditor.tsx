@@ -22,6 +22,50 @@ export default function EffectChainEditor({ laneKey, embedded = false, emptyMess
   const remove = useEffectsStore((s) => s.remove);
   const toggleBypass = useEffectsStore((s) => s.toggleBypass);
 
+  // Append-on-drop handlers used by both the embedded and standalone
+  // renders so the user can keep dropping effects after the first one.
+  const [railDragOver, setRailDragOver] = useState(false);
+  const isEffectDrag = (dt: DataTransfer): boolean => {
+    for (const t of Array.from(dt.types)) if (t === EFFECT_DRAG_MIME) return true;
+    return false;
+  };
+  const onRailDragOver = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!laneKey || !isEffectDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!railDragOver) setRailDragOver(true);
+  };
+  const onRailDragLeave = () => setRailDragOver(false);
+  const onRailDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    if (!laneKey || !isEffectDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    setRailDragOver(false);
+    try {
+      const raw = e.dataTransfer.getData(EFFECT_DRAG_MIME);
+      const payload = JSON.parse(raw) as { kind: EffectKind };
+      if (!payload?.kind) return;
+      useEffectsStore.getState().add(laneKey, payload.kind);
+    } catch { /* malformed payload — ignore */ }
+  };
+  // Trailing "drop more" slot at the end of the chain rail. Renders
+  // a faint dashed box that lights up while dragging, so users see
+  // a clear target for adding additional effects beyond the first.
+  const TrailingDropSlot = () => (
+    <div
+      className="shrink-0 self-stretch flex items-center justify-center rounded-xl select-none transition-colors"
+      style={{
+        width: 110,
+        height: 252,
+        border: railDragOver ? '2px dashed rgba(168, 85, 247, 0.85)' : '1.5px dashed rgba(255,255,255,0.10)',
+        background: railDragOver ? 'rgba(168, 85, 247, 0.12)' : 'rgba(255,255,255,0.02)',
+      }}
+    >
+      <span className={`text-[10.5px] uppercase tracking-wider px-2 text-center leading-tight ${railDragOver ? 'text-white font-semibold' : 'text-white/35 italic'}`}>
+        {railDragOver ? 'Drop to add' : 'Drop another EQ or Comp'}
+      </span>
+    </div>
+  );
+
   if (!laneKey) return null;
   if (!chain || chain.length === 0) {
     // Show a dedicated drop target so the user knows where effects
@@ -42,7 +86,13 @@ export default function EffectChainEditor({ laneKey, embedded = false, emptyMess
   // controls into a single glass card.
   if (embedded) {
     return (
-      <div className="shrink-0 px-3 py-3 overflow-x-auto">
+      <div
+        className="shrink-0 px-3 py-3 overflow-x-auto"
+        onDragOver={onRailDragOver}
+        onDragEnter={onRailDragOver}
+        onDragLeave={onRailDragLeave}
+        onDrop={onRailDrop}
+      >
         <Reorder.Group
           axis="x"
           values={chain.map((e) => e.id)}
@@ -85,14 +135,21 @@ export default function EffectChainEditor({ laneKey, embedded = false, emptyMess
             );
           })}
         </Reorder.Group>
+        <div className="ml-2 inline-flex"><TrailingDropSlot /></div>
       </div>
     );
   }
 
   return (
-    <div className="shrink-0 mt-2 rounded-2xl glass flex overflow-hidden">
+    <div
+      className="shrink-0 mt-2 rounded-2xl glass flex overflow-hidden"
+      onDragOver={onRailDragOver}
+      onDragEnter={onRailDragOver}
+      onDragLeave={onRailDragLeave}
+      onDrop={onRailDrop}
+    >
       {/* Chain rail spans the whole panel — no separate identity column. */}
-      <div className="flex-1 min-w-0 px-3 py-3 overflow-x-auto">
+      <div className="flex-1 min-w-0 px-3 py-3 overflow-x-auto flex items-stretch gap-2">
         <Reorder.Group
           axis="x"
           values={chain.map((e) => e.id)}
@@ -142,6 +199,7 @@ export default function EffectChainEditor({ laneKey, embedded = false, emptyMess
             );
           })}
         </Reorder.Group>
+        <TrailingDropSlot />
       </div>
     </div>
   );
