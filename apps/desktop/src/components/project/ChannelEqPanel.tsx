@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { motion } from 'framer-motion';
 import {
   EQ_BAND_LABELS,
   defaultParams,
@@ -107,6 +108,13 @@ export default function ChannelEqPanel({
   // 60 fps via setState would re-render the whole panel each frame.
   const spectrumFillRef = useRef<SVGPathElement | null>(null);
   const spectrumLineRef = useRef<SVGPathElement | null>(null);
+  // Mirror of `bands` so the analyser rAF can read the latest positions
+  // without re-subscribing. Avoids tearing down the rAF on every drag.
+  const bandsRef = useRef(bands);
+  bandsRef.current = bands;
+  // Per-band energy (0..1) read from the FFT magnitudes around each
+  // band's centre frequency. Drives the spotlight + halo motion.
+  const [bandEnergies, setBandEnergies] = useState<number[]>([0, 0, 0, 0]);
 
   // Live spectrum visualizer. Tapped at the head of the EQ chain, so
   // the curve shows what's flowing INTO the EQ (pre-band-shaping).
@@ -117,6 +125,9 @@ export default function ChannelEqPanel({
     let buf: Uint8Array | null = null;
     const STEPS = 120;
     const yBottom = PLOT_Y + PLOT_H;
+    // Asymmetric smoothing for per-band energy — fast attack so hits
+    // pop, slow release so the halo decays gracefully between transients.
+    const smoothed = [0, 0, 0, 0];
     const tick = () => {
       raf = requestAnimationFrame(tick);
       const fillEl = spectrumFillRef.current;
@@ -124,24 +135,19 @@ export default function ChannelEqPanel({
       if (!fillEl || !lineEl) return;
       const analyser = getLaneAnalyser(laneKey);
       if (!analyser) {
-        // No chain yet — flatten the spectrum to the baseline so the
-        // panel doesn't show stale data from a previous lane.
         fillEl.setAttribute('d', '');
         lineEl.setAttribute('d', '');
+        // Decay the halo state when audio stops so it eases back to rest.
+        for (let i = 0; i < 4; i++) smoothed[i] *= 0.9;
+        setBandEnergies([smoothed[0], smoothed[1], smoothed[2], smoothed[3]]);
         return;
       }
       const bins = analyser.frequencyBinCount;
       if (!buf || buf.length !== bins) buf = new Uint8Array(bins);
-      // Newer TS lib types narrow the parameter to Uint8Array<ArrayBuffer>;
-      // our buf carries the wider ArrayBufferLike at the type level.
-      // The runtime contract is identical, so cast at the call site.
       analyser.getByteFrequencyData(buf as unknown as Uint8Array<ArrayBuffer>);
       const sampleRate = analyser.context.sampleRate;
       const nyquist = sampleRate / 2;
 
-      // Build a smoothed log-frequency path. For each step, average
-      // the bins falling inside the corresponding log-frequency band
-      // so isolated FFT spikes don't create visual jitter.
       const linePts: string[] = [];
       let prevLogF = LOG_MIN;
       for (let i = 0; i <= STEPS; i++) {
@@ -153,11 +159,8 @@ export default function ChannelEqPanel({
         const binHi = Math.min(bins - 1, Math.ceil((fHi / nyquist) * bins));
         let acc = 0, count = 0;
         for (let b = binLo; b <= binHi; b++) { acc += buf[b]; count++; }
-        const v = count > 0 ? (acc / count) / 255 : 0; // 0..1
+        const v = count > 0 ? (acc / count) / 255 : 0;
         const x = PLOT_X + t * PLOT_W;
-        // Map amplitude to graph height. v=1 fills the full plot,
-        // v=0 sits at the bottom. Apply a small gamma so quiet signal
-        // doesn't disappear into the floor.
         const gamma = Math.pow(v, 0.7);
         const y = yBottom - gamma * PLOT_H;
         linePts.push(`${i === 0 ? 'M' : 'L'} ${x.toFixed(2)} ${y.toFixed(2)}`);
@@ -167,6 +170,25 @@ export default function ChannelEqPanel({
       const fillPathSpectrum = `${linePath} L ${PLOT_X + PLOT_W} ${yBottom} L ${PLOT_X} ${yBottom} Z`;
       lineEl.setAttribute('d', linePath);
       fillEl.setAttribute('d', fillPathSpectrum);
+
+      // Per-band energy — average FFT magnitudes inside ±1/3-octave of
+      // each band's centre frequency. Drives the spotlight + halo.
+      const cur = bandsRef.current;
+      const energies: number[] = [0, 0, 0, 0];
+      for (let i = 0; i < 4; i++) {
+        const f = cur[i]?.freq || 1000;
+        const fLo = f / 1.4;
+        const fHi = f * 1.4;
+        const binLo = Math.max(0, Math.floor((fLo / nyquist) * bins));
+        const binHi = Math.min(bins - 1, Math.ceil((fHi / nyquist) * bins));
+        let acc = 0, count = 0;
+        for (let b = binLo; b <= binHi; b++) { acc += buf[b]; count++; }
+        const raw = count > 0 ? (acc / count) / 255 : 0;
+        const a = raw > smoothed[i] ? 0.45 : 0.10;
+        smoothed[i] = smoothed[i] * (1 - a) + raw * a;
+        energies[i] = Math.min(1, smoothed[i] * 1.8);
+      }
+      setBandEnergies(energies);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
@@ -339,6 +361,14 @@ export default function ChannelEqPanel({
               <stop offset="60%" stopColor={accent} />
               <stop offset="100%" stopColor="#6d28d9" />
             </radialGradient>
+            {/* Vertical spotlight gradient — fades in at the centre and
+                out at top/bottom so each band's frequency column glows
+                from the inside, like a stage light. */}
+            <linearGradient id="eqSpotlightGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={accent} stopOpacity="0" />
+              <stop offset="50%" stopColor={accent} stopOpacity="0.55" />
+              <stop offset="100%" stopColor={accent} stopOpacity="0" />
+            </linearGradient>
           </defs>
 
           {/* Live input spectrum — tapped at the EQ chain head. Drawn
@@ -379,32 +409,81 @@ export default function ChannelEqPanel({
             />
           ))}
 
+          {/* Per-band spotlight beams — vertical gradient strips that
+              brighten with the energy at each band's centre frequency.
+              Sit BEHIND the curve so they read as light spilling out
+              of the EQ from the band's column. */}
+          {bands.map((band, idx) => {
+            const cx = freqToX(band.freq);
+            const energy = bandEnergies[idx] ?? 0;
+            return (
+              <motion.rect
+                key={`spot-${idx}`}
+                x={cx - 16}
+                y={PLOT_Y}
+                width={32}
+                height={PLOT_H}
+                fill="url(#eqSpotlightGrad)"
+                animate={{ opacity: 0.04 + energy * 0.65 }}
+                transition={{ type: 'tween', duration: 0.06, ease: 'linear' }}
+                style={{ pointerEvents: 'none' }}
+              />
+            );
+          })}
+
           {/* Filled area beneath the curve */}
           <path d={fillPath} fill="url(#eqFillGrad)" />
           {/* Curve */}
           <path d={curvePath} fill="none" stroke={accent} strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
 
-          {/* Draggable band nodes */}
+          {/* Draggable band nodes. Each node has three layers:
+              - outer halo: pulses radius + opacity with band energy
+              - inner glow ring: subtle steady ring for visual weight
+              - core: the draggable node itself, spring-positioned so
+                non-drag updates (double-click reset) feel buttery */}
           {bands.map((band, idx) => {
             const cx = freqToX(band.freq);
             const cy = gainToY(band.gain);
+            const energy = bandEnergies[idx] ?? 0;
             return (
               <g key={idx}>
+                <motion.circle
+                  cx={cx}
+                  cy={cy}
+                  fill={accent}
+                  stroke="none"
+                  animate={{
+                    r: 9 + energy * 14,
+                    opacity: 0.16 + energy * 0.40,
+                  }}
+                  transition={{ type: 'spring', stiffness: 220, damping: 16 }}
+                  style={{ pointerEvents: 'none' }}
+                />
                 <circle
                   cx={cx}
                   cy={cy}
                   r={9}
                   fill="rgba(168,85,247,0.18)"
                   stroke="none"
+                  style={{ pointerEvents: 'none' }}
                 />
-                <circle
-                  cx={cx}
-                  cy={cy}
+                <motion.circle
+                  initial={false}
+                  animate={{ cx, cy }}
+                  transition={{ type: 'spring', stiffness: 600, damping: 34 }}
                   r={5.5}
                   fill="url(#eqNodeGrad)"
                   stroke="rgba(255,255,255,0.85)"
                   strokeWidth={1.2}
-                  style={{ cursor: 'grab', filter: `drop-shadow(0 0 4px ${accent})` }}
+                  whileHover={{ scale: 1.18 }}
+                  whileTap={{ scale: 1.10 }}
+                  style={{
+                    cursor: 'grab',
+                    filter: `drop-shadow(0 0 ${4 + energy * 10}px ${accent})`,
+                    originX: `${cx}px`,
+                    originY: `${cy}px`,
+                    transformBox: 'fill-box' as any,
+                  }}
                   onPointerDown={onPointerDown(idx)}
                   onDoubleClick={onDoubleClickNode(idx)}
                 />
