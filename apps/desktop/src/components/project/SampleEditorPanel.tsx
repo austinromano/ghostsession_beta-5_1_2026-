@@ -126,15 +126,21 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const applyWarp = (next: boolean) => ids.forEach((id) => setTrackWarp(id, next));
   const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
 
+  // The chain editor and the per-clip controls share one card now.
+  // Chain panels (EQ + Comp) render first, then a divider, then the
+  // file-info / waveform / sliders block.
+  const hasChain = useEffectsStore((s) => s.getChain(trackId).length > 0);
   return (
-    <>
-      {/* Per-clip FX chain — each track's effects only affect its
-          own audio. Two clips that share a source file each carry
-          their own independent chain. */}
-      <EffectChainEditor laneKey={trackId} />
-    <div className="shrink-0 h-[140px] mt-2 rounded-2xl glass flex overflow-hidden">
+    <div className="shrink-0 mt-2 rounded-2xl glass flex overflow-x-auto items-stretch" style={{ minHeight: 140 }}>
+      {/* Per-clip FX chain — each track's effects only affect its own
+          audio. Embedded so it shares the outer glass card with the
+          per-clip controls instead of stacking as a separate section. */}
+      <EffectChainEditor laneKey={trackId} embedded={true} />
+      {hasChain && (
+        <div className="shrink-0 self-stretch w-px bg-white/[0.06] my-3" />
+      )}
       {/* Left: file info + metadata pills */}
-      <div className="shrink-0 w-[220px] flex flex-col gap-2 px-3 py-2 border-r border-white/[0.05]">
+      <div className="shrink-0 w-[220px] flex flex-col gap-2 px-3 py-2 border-r border-white/[0.05] self-stretch">
         <div className="flex items-center gap-2 min-w-0">
           <button
             onClick={handlePreview}
@@ -249,7 +255,6 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         </div>
       </div>
     </div>
-    </>
   );
 }
 

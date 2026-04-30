@@ -11,7 +11,7 @@ import CompressorPanel from './CompressorPanel';
 // follow-up; the chain shape is what matters here so the visual flow
 // (drop → reorder → bypass → delete) works end-to-end now.
 
-export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
+export default function EffectChainEditor({ laneKey, embedded = false }: { laneKey: string; embedded?: boolean }) {
   // Subscribe to byProject so we re-render when other components mutate
   // the chain (drop on the lane, etc.). getChain reads off currentProjectId.
   const byProject = useEffectsStore((s) => s.byProject);
@@ -22,6 +22,59 @@ export default function EffectChainEditor({ laneKey }: { laneKey: string }) {
   const toggleBypass = useEffectsStore((s) => s.toggleBypass);
 
   if (!laneKey || !chain || chain.length === 0) return null;
+
+  // When embedded, render only the inner chain rail. Caller is
+  // responsible for the surrounding card / spacing. Lets the
+  // SampleEditorPanel fuse the chain editor with the per-clip
+  // controls into a single glass card.
+  if (embedded) {
+    return (
+      <div className="shrink-0 px-3 py-3 overflow-x-auto">
+        <Reorder.Group
+          axis="x"
+          values={chain.map((e) => e.id)}
+          onReorder={(newIds) => setOrder(laneKey, newIds as string[])}
+          className="flex gap-2 items-stretch"
+          style={{ listStyle: 'none', padding: 0, margin: 0 }}
+        >
+          {chain.map((fx, idx) => {
+            const isLast = idx === chain.length - 1;
+            if (fx.kind === 'eq') {
+              return (
+                <EqChainItem
+                  key={fx.id}
+                  fx={fx}
+                  laneKey={laneKey}
+                  isLast={isLast}
+                  onClose={() => remove(laneKey, fx.id)}
+                />
+              );
+            }
+            if (fx.kind === 'comp') {
+              return (
+                <CompChainItem
+                  key={fx.id}
+                  fx={fx}
+                  laneKey={laneKey}
+                  isLast={isLast}
+                  onClose={() => remove(laneKey, fx.id)}
+                />
+              );
+            }
+            return (
+              <ChainCard
+                key={fx.id}
+                fx={fx}
+                isLast={isLast}
+                onBypass={() => toggleBypass(laneKey, fx.id)}
+                onRemove={() => remove(laneKey, fx.id)}
+              />
+            );
+          })}
+        </Reorder.Group>
+      </div>
+    );
+  }
 
   return (
     <div className="shrink-0 mt-2 rounded-2xl glass flex overflow-hidden">
