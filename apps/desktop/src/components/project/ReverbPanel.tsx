@@ -195,6 +195,7 @@ export default function ReverbPanel({
           >
             <div className="flex-1 flex justify-center min-w-0">
               <Knob
+                compact
                 label="Mix"
                 valueLabel={formatPercent(mix)}
                 value={mix} min={0} max={1}
@@ -203,6 +204,7 @@ export default function ReverbPanel({
             </div>
             <div className="flex-1 flex justify-center min-w-0">
               <Knob
+                compact
                 label="Time"
                 valueLabel={formatSeconds(time)}
                 value={time} min={0.1} max={10}
@@ -211,6 +213,7 @@ export default function ReverbPanel({
             </div>
             <div className="flex-1 flex justify-center min-w-0">
               <Knob
+                compact
                 label="Damping"
                 valueLabel={formatPercent(damping)}
                 value={damping} min={0} max={1}
