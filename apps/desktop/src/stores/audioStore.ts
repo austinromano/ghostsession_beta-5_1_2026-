@@ -603,6 +603,12 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const trimDuration = trimEnd - trimStart;
       const trackStartsAt = track.startOffset;
       const projectTime = offset;
+      // trim values + buffer position are BUFFER seconds; project time is
+      // PROJECT seconds. When pitch ≠ 0 the buffer was pre-stretched by
+      // pitchFactor and plays back at pitchFactor, so 1 project-sec = pitchFactor
+      // buffer-secs. Mid-clip restarts have to convert via this rate or the
+      // source skips the wrong amount of buffer and drifts off the grid.
+      const playbackRate = source.playbackRate.value;
 
       track.source = source;
       track.gainNode = gain;
@@ -610,8 +616,9 @@ export const useAudioStore = create<AudioState>((set, get) => {
 
       if (projectTime >= trackStartsAt) {
         const elapsed = projectTime - trackStartsAt;
-        if (elapsed >= trimDuration) return;
-        source.start(0, trimStart + elapsed, trimDuration - elapsed);
+        const bufElapsed = elapsed * playbackRate;
+        if (bufElapsed >= trimDuration) return;
+        source.start(0, trimStart + bufElapsed, trimDuration - bufElapsed);
       } else {
         const delay = trackStartsAt - projectTime;
         source.start(ctx.currentTime + delay, trimStart, trimDuration);
