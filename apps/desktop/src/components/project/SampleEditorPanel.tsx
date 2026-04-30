@@ -25,13 +25,6 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const setTrackPan = useAudioStore((s) => s.setTrackPan);
   const selectedBusId = useAudioStore((s) => s.selectedBusId);
   const currentProject = useProjectStore((s) => s.currentProject);
-  // Re-render trigger for chain shape changes — used to drive the
-  // divider visibility in the merged card. Subscribing at the top of
-  // the component keeps the hooks-order invariant React enforces;
-  // calling this AFTER one of the early returns below caused
-  // "Rendered more hooks than during the previous render" (#310).
-  const effectsByProject = useEffectsStore((s) => s.byProject);
-  void effectsByProject;
 
   // The panel operates on the WHOLE selection. Single click = one clip;
   // multi-select = same controls apply to every selected clip at once.
@@ -133,24 +126,14 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
   const applyWarp = (next: boolean) => ids.forEach((id) => setTrackWarp(id, next));
   const applyBpm = (next: number) => ids.forEach((id) => setTrackBpm(id, next));
 
-  // The chain editor and the per-clip controls share one card now.
-  // Chain panels (EQ + Comp) render first, then a divider, then the
-  // file-info / waveform / sliders block.
-  // Read the chain via the store's static getter — `effectsByProject`
-  // above is the React-tracked dep, so this stays in sync without
-  // adding a second hook below the early returns.
-  const hasChain = useEffectsStore.getState().getChain(trackId).length > 0;
   return (
-    <div className="shrink-0 mt-2 rounded-2xl glass flex overflow-x-auto items-stretch" style={{ minHeight: 140 }}>
-      {/* Per-clip FX chain — each track's effects only affect its own
-          audio. Embedded so it shares the outer glass card with the
-          per-clip controls instead of stacking as a separate section. */}
-      <EffectChainEditor laneKey={trackId} embedded={true} />
-      {hasChain && (
-        <div className="shrink-0 self-stretch w-px bg-white/[0.06] my-3" />
-      )}
+    <>
+      {/* Per-clip FX chain — its own card, sitting above the per-clip
+          controls. Renders nothing when the track has no effects. */}
+      <EffectChainEditor laneKey={trackId} />
+    <div className="shrink-0 h-[140px] mt-2 rounded-2xl glass flex overflow-hidden">
       {/* Left: file info + metadata pills */}
-      <div className="shrink-0 w-[220px] flex flex-col gap-2 px-3 py-2 border-r border-white/[0.05] self-stretch">
+      <div className="shrink-0 w-[220px] flex flex-col gap-2 px-3 py-2 border-r border-white/[0.05]">
         <div className="flex items-center gap-2 min-w-0">
           <button
             onClick={handlePreview}
@@ -265,6 +248,7 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         </div>
       </div>
     </div>
+    </>
   );
 }
 
