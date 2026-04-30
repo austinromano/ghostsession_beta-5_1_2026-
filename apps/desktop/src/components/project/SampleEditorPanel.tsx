@@ -191,10 +191,11 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
 
       {/* Centre: big waveform with a bar-line overlay + warp markers
           (gray transient markers at detected beats, gold user-pinned
-          warp markers). Right-click empty space to add a marker, drag
-          a marker to move, right-click to remove. */}
+          warp markers). overflow-hidden on the inner positioned
+          wrapper clips the absolute markers + bar grid so they can
+          never bleed into the right slider column. */}
       <div className="flex-1 min-w-0 px-3 py-2 flex">
-        <div className="flex-1 relative">
+        <div className="flex-1 relative overflow-hidden">
           <Waveform
             seed={`editor:${trackId}`}
             height={120}
@@ -208,9 +209,13 @@ export default function SampleEditorPanel({ projectId }: { projectId: string }) 
         </div>
       </div>
 
-      {/* Right: knobs (volume + pitch). Plain range inputs for now —
-           swap for proper rotary knobs in a follow-up. */}
-      <div className="shrink-0 w-[180px] flex flex-col gap-3 px-3 py-2 border-l border-white/[0.05] overflow-y-auto">
+      {/* Right: knobs (volume + pitch). Solid background + relative
+           z-index so range-input tracks never read against the
+           waveform if anything upstream ever leaks through. */}
+      <div
+        className="shrink-0 w-[180px] flex flex-col gap-3 px-3 py-2 border-l border-white/[0.05] overflow-y-auto relative"
+        style={{ background: 'rgba(10, 4, 18, 0.95)', zIndex: 1 }}
+      >
         <Slider
           label="Vol"
           value={volume}
