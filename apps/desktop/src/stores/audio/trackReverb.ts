@@ -43,9 +43,6 @@ interface TrackReverbEntry {
   msInvSide: GainNode;
   wet: GainNode;
   output: GainNode;
-  // Parallel tap on the post-mix signal — drives the panel's
-  // visualizer pulse so the iso cubes brighten on each audio peak.
-  outputAnalyser: AnalyserNode;
   bypassed: boolean;
   // Cached params so we know when to rebuild the IR.
   lastTime: number;
@@ -137,11 +134,6 @@ export function buildTrackReverbChain(
 
   const wet = ctx.createGain();
   const output = ctx.createGain();
-  const outputAnalyser = ctx.createAnalyser();
-  outputAnalyser.fftSize = 1024;
-  outputAnalyser.smoothingTimeConstant = 0.6;
-  // Parallel tap — analyser does NOT sit in the audio path.
-  output.connect(outputAnalyser);
 
   // Dry mix. params.mix is the WET amount (0..1) so dry = 1 - mix.
   const mix = clamp(params.mix, 0, 1);
@@ -191,7 +183,7 @@ export function buildTrackReverbChain(
     splitter, dry, predelay, convolver, damp,
     widthMid, widthSide,
     splitterMS, mergerMS, msMidIn, msSideIn, msInvR, msInvSide,
-    wet, output, outputAnalyser,
+    wet, output,
     bypassed,
     lastTime: params.time,
     lastSize: params.size,
@@ -270,14 +262,6 @@ export function setLaneReverbBypass(laneKey: string, bypassed: boolean, ctx?: Au
   });
 }
 
-/** Output analyser — drives the panel's visualizer pulse. */
-export function getLaneReverbAnalyser(laneKey: string): AnalyserNode | null {
-  for (const entry of registry.values()) {
-    if (entry.laneKey === laneKey) return entry.outputAnalyser;
-  }
-  return null;
-}
-
 export function removeTrackReverb(trackId: string): void {
   const entry = registry.get(trackId);
   if (!entry) return;
@@ -286,7 +270,7 @@ export function removeTrackReverb(trackId: string): void {
     entry.splitter, entry.dry, entry.predelay, entry.convolver, entry.damp,
     entry.widthMid, entry.widthSide, entry.splitterMS, entry.mergerMS,
     entry.msMidIn, entry.msSideIn, entry.msInvR, entry.msInvSide,
-    entry.wet, entry.output, entry.outputAnalyser,
+    entry.wet, entry.output,
   ]) {
     try { node.disconnect(); } catch { /* ignore */ }
   }
