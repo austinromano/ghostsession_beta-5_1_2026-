@@ -45,71 +45,46 @@ export default function UserVoiceBar({ onSettings }: { onSettings?: () => void }
           {status}
         </div>
       </div>
-      {/* Mic group: icon button + dropdown chevron, mirroring Discord's
-          combined "mute / pick device" affordance. The icon toggles the
-          mute state; the chevron is reserved for input-device selection
-          (popup not yet wired — visual stub for now). */}
-      <div className="shrink-0 flex items-stretch">
-        <button
-          onClick={toggleMuted}
-          title={muted ? 'Unmute mic' : 'Mute mic'}
-          className={`w-7 h-7 flex items-center justify-center rounded-l transition-colors ${muted ? 'text-red-400 bg-red-500/10 hover:bg-red-500/20' : 'text-white/65 hover:text-white hover:bg-white/[0.06]'}`}
-        >
-          {muted ? (
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="1" y1="1" x2="23" y2="23" />
-              <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
-              <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
-              <line x1="12" y1="19" x2="12" y2="23" />
-            </svg>
-          ) : (
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-              <line x1="12" y1="19" x2="12" y2="23" />
-              <line x1="8" y1="23" x2="16" y2="23" />
-            </svg>
-          )}
-        </button>
-        <button
-          title="Input device"
-          className="h-7 px-1 flex items-center justify-center rounded-r text-white/55 hover:text-white hover:bg-white/[0.06] transition-colors"
-        >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="6 9 12 15 18 9" />
+      <button
+        onClick={toggleMuted}
+        title={muted ? 'Unmute mic' : 'Mute mic'}
+        className={`shrink-0 w-7 h-7 flex items-center justify-center rounded transition-colors ${muted ? 'text-red-400 bg-red-500/10 hover:bg-red-500/20' : 'text-white/65 hover:text-white hover:bg-white/[0.06]'}`}
+      >
+        {muted ? (
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="1" y1="1" x2="23" y2="23" />
+            <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
+            <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23" />
+            <line x1="12" y1="19" x2="12" y2="23" />
           </svg>
-        </button>
-      </div>
-      {/* Headphones group: deafen toggle + output-device chevron. */}
-      <div className="shrink-0 flex items-stretch">
-        <button
-          onClick={toggleDeafened}
-          title={deafened ? 'Undeafen' : 'Deafen'}
-          className={`w-7 h-7 flex items-center justify-center rounded-l transition-colors ${deafened ? 'text-red-400 bg-red-500/10 hover:bg-red-500/20' : 'text-white/65 hover:text-white hover:bg-white/[0.06]'}`}
-        >
-          {deafened ? (
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <line x1="1" y1="1" x2="23" y2="23" />
-              <path d="M3 18v-6a9 9 0 0 1 14.16-7.36" />
-              <path d="M21 12v6a2 2 0 0 1-2 2h-1v-7" />
-              <path d="M5 19v-7a7 7 0 0 1 .55-2.74" />
-            </svg>
-          ) : (
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
-              <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z" />
-            </svg>
-          )}
-        </button>
-        <button
-          title="Output device"
-          className="h-7 px-1 flex items-center justify-center rounded-r text-white/55 hover:text-white hover:bg-white/[0.06] transition-colors"
-        >
-          <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-            <polyline points="6 9 12 15 18 9" />
+        ) : (
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" y1="19" x2="12" y2="23" />
+            <line x1="8" y1="23" x2="16" y2="23" />
           </svg>
-        </button>
-      </div>
+        )}
+      </button>
+      <button
+        onClick={toggleDeafened}
+        title={deafened ? 'Undeafen' : 'Deafen'}
+        className={`shrink-0 w-7 h-7 flex items-center justify-center rounded transition-colors ${deafened ? 'text-red-400 bg-red-500/10 hover:bg-red-500/20' : 'text-white/65 hover:text-white hover:bg-white/[0.06]'}`}
+      >
+        {deafened ? (
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="1" y1="1" x2="23" y2="23" />
+            <path d="M3 18v-6a9 9 0 0 1 14.16-7.36" />
+            <path d="M21 12v6a2 2 0 0 1-2 2h-1v-7" />
+            <path d="M5 19v-7a7 7 0 0 1 .55-2.74" />
+          </svg>
+        ) : (
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+            <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z" />
+          </svg>
+        )}
+      </button>
       <button
         onClick={onSettings}
         title="User settings"
