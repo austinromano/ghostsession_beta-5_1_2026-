@@ -57,7 +57,7 @@ export default function UserVoiceBar({ onSettings }: { onSettings?: () => void }
             </span>
           )}
         </div>
-        <div className={`flex items-center gap-1 text-[10.5px] truncate ${micError ? 'text-red-400' : 'text-white/65'}`}>
+        <div className={`flex items-center gap-1.5 truncate ${micError ? 'text-red-400 text-[10.5px]' : 'text-white/85'}`}>
           {micError ? (
             <span>{status}</span>
           ) : (
@@ -65,11 +65,11 @@ export default function UserVoiceBar({ onSettings }: { onSettings?: () => void }
               {/* Coin glyph for the points balance — purple ring with a
                   inner highlight so it reads as a token, matching the
                   reference Discord-loyalty chip. */}
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="2.2">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#a855f7" strokeWidth="2.2">
                 <circle cx="12" cy="12" r="9" />
                 <circle cx="12" cy="12" r="4.5" stroke="#c084fc" strokeWidth="1.6" />
               </svg>
-              <span className="tabular-nums font-medium text-white/85">{formattedPoints}</span>
+              <span className="text-[14px] tabular-nums font-semibold text-white/95">{formattedPoints}</span>
             </>
           )}
         </div>
