@@ -136,11 +136,48 @@ export default function ReverbPanel({
         )}
       </div>
 
-      {/* Main row: visualization + Size/Decay column. Tightened so
-          the panel fits 252 px total height. */}
-      <div className="flex gap-2 px-3 pt-2 pb-1" style={{ height: 130 }}>
-        <RoomVisualizer size={size} decay={decay} mix={mix} />
-        <div className="flex flex-col items-center justify-center gap-1 shrink-0 pl-2 border-l" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
+      {/* Main area split horizontally: left column stacks the iso
+          visualizer + the Mix/Time/Damping knob row; right column
+          stacks Size + Decay + Width so they read as a single
+          dedicated "room" parameter strip. Total height is the
+          panel minus the header. */}
+      <div className="flex" style={{ height: PANEL_H - 36 }}>
+        {/* Left column */}
+        <div className="flex flex-col flex-1 min-w-0">
+          <div className="flex px-3 pt-2 pb-1" style={{ height: 130 }}>
+            <RoomVisualizer size={size} decay={decay} mix={mix} />
+          </div>
+          {/* Bottom knob row — Mix / Time / Damping. */}
+          <div
+            className="flex items-center justify-around px-3 pt-1 pb-2 border-t"
+            style={{ borderColor: 'rgba(255,255,255,0.05)', flex: 1 }}
+          >
+            <Knob
+              label="Mix"
+              valueLabel={formatPercent(mix)}
+              value={mix} min={0} max={1}
+              onChange={(v) => setReverbParam(laneKey, effect.id, 'mix', v)}
+            />
+            <Knob
+              label="Time"
+              valueLabel={formatSeconds(time)}
+              value={time} min={0.1} max={10}
+              onChange={(v) => setReverbParam(laneKey, effect.id, 'time', v)}
+            />
+            <Knob
+              label="Damping"
+              valueLabel={formatPercent(damping)}
+              value={damping} min={0} max={1}
+              onChange={(v) => setReverbParam(laneKey, effect.id, 'damping', v)}
+            />
+          </div>
+        </div>
+
+        {/* Right column — Size / Decay / Width vertically stacked. */}
+        <div
+          className="flex flex-col items-center justify-around shrink-0 px-2 py-2 border-l"
+          style={{ width: 70, borderColor: 'rgba(255,255,255,0.05)' }}
+        >
           <Knob
             compact
             label="Size"
@@ -155,35 +192,14 @@ export default function ReverbPanel({
             value={decay} min={0} max={1}
             onChange={(v) => setReverbParam(laneKey, effect.id, 'decay', v)}
           />
+          <Knob
+            compact
+            label="Width"
+            valueLabel={formatPercent(width)}
+            value={width} min={0} max={1}
+            onChange={(v) => setReverbParam(laneKey, effect.id, 'width', v)}
+          />
         </div>
-      </div>
-
-      {/* Bottom knob row */}
-      <div className="flex items-center justify-around px-3 pt-1 pb-2 border-t" style={{ borderColor: 'rgba(255,255,255,0.05)' }}>
-        <Knob
-          label="Mix"
-          valueLabel={formatPercent(mix)}
-          value={mix} min={0} max={1}
-          onChange={(v) => setReverbParam(laneKey, effect.id, 'mix', v)}
-        />
-        <Knob
-          label="Time"
-          valueLabel={formatSeconds(time)}
-          value={time} min={0.1} max={10}
-          onChange={(v) => setReverbParam(laneKey, effect.id, 'time', v)}
-        />
-        <Knob
-          label="Damping"
-          valueLabel={formatPercent(damping)}
-          value={damping} min={0} max={1}
-          onChange={(v) => setReverbParam(laneKey, effect.id, 'damping', v)}
-        />
-        <Knob
-          label="Width"
-          valueLabel={formatPercent(width)}
-          value={width} min={0} max={1}
-          onChange={(v) => setReverbParam(laneKey, effect.id, 'width', v)}
-        />
       </div>
     </div>
   );
