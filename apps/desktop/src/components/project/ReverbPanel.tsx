@@ -344,24 +344,26 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
           );
         })}
 
-        {/* Y-axis labels — left = dB scale. Range pulled in to sit
-            alongside the layer span instead of floating above the
-            stack with empty headroom. */}
+        {/* Y-axis labels — left = dB scale. Tucked in close to the
+            graph (cx) with a small margin off the SVG's left edge,
+            so the numbers read alongside the layer stack instead of
+            hugging the panel edge. */}
         {dBLabels.map((label, i) => {
           const topY = 22;
           const bottomY = baseY + 6;
           const y = topY + (i / (dBLabels.length - 1)) * (bottomY - topY);
           return (
-            <text key={`db-${i}`} x={2} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace">{label}</text>
+            <text key={`db-${i}`} x={70} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="end">{label}</text>
           );
         })}
-        {/* Y-axis labels — right = ms scale. Same vertical range. */}
+        {/* Y-axis labels — right = ms scale. Mirrors the dB column;
+            sits ~70 px from the right edge of the SVG. */}
         {msLabels.map((label, i) => {
           const topY = 28;
           const bottomY = baseY + 6;
           const y = topY + (i / (msLabels.length - 1)) * (bottomY - topY);
           return (
-            <text key={`ms-${i}`} x={VIEW_W - 14} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="start">{label}</text>
+            <text key={`ms-${i}`} x={VIEW_W - 70} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="start">{label}</text>
           );
         })}
       </svg>
