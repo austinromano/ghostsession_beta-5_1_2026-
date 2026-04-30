@@ -205,9 +205,11 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
   const layers = useMemo(() => {
     const n = 5;
     const out: Array<{ halfW: number; halfH: number; y: number; fillOpacity: number; strokeOpacity: number; wireframe: boolean }> = [];
-    const baseHalfW = 36 + size * 70;        // 36..106
+    // Bigger base + wider vertical spread so the pyramid fills the
+    // viewport instead of bunching at the floor.
+    const baseHalfW = 50 + size * 90;        // 50..140
     const baseHalfH = baseHalfW * 0.42;
-    const vertSpacing = 8 + decay * 14;      // 8..22
+    const vertSpacing = 14 + decay * 22;     // 14..36
     // Layer 0 = base (largest, brightest); layers grow smaller and
     // climb upward.
     for (let i = 0; i < n; i++) {
@@ -314,16 +316,22 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
           );
         })}
 
-        {/* Y-axis labels — left = dB scale */}
+        {/* Y-axis labels — left = dB scale. Range pulled in to sit
+            alongside the layer span instead of floating above the
+            stack with empty headroom. */}
         {dBLabels.map((label, i) => {
-          const y = 16 + (i / (dBLabels.length - 1)) * (VIEW_H - 30);
+          const topY = 22;
+          const bottomY = baseY + 6;
+          const y = topY + (i / (dBLabels.length - 1)) * (bottomY - topY);
           return (
             <text key={`db-${i}`} x={2} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace">{label}</text>
           );
         })}
-        {/* Y-axis labels — right = ms scale */}
+        {/* Y-axis labels — right = ms scale. Same vertical range. */}
         {msLabels.map((label, i) => {
-          const y = 22 + (i / (msLabels.length - 1)) * (VIEW_H - 40);
+          const topY = 28;
+          const bottomY = baseY + 6;
+          const y = topY + (i / (msLabels.length - 1)) * (bottomY - topY);
           return (
             <text key={`ms-${i}`} x={VIEW_W - 14} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="start">{label}</text>
           );
