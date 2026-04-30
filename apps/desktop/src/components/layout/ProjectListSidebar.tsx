@@ -6,6 +6,7 @@ import { useAudioStore } from '../../stores/audioStore';
 import { ROOMS as COMMUNITY_ROOMS } from '../social/CommunityRooms';
 import { useCommunityStore } from '../../stores/communityStore';
 import SampleLibrarySection from './SampleLibrarySection';
+import UserVoiceBar from './UserVoiceBar';
 import EffectsSection from './EffectsSection';
 import Avatar from '../common/Avatar';
 
@@ -464,6 +465,16 @@ function ProjectListSidebar({
 
         {/* Friends */}
       </Reorder.Group>
+
+      {/* Discord-style user-voice bar — mic auto-acquires on session
+          join, see useVoiceMic. Sits directly above the storage bar. */}
+      <UserVoiceBar
+        onSettings={() => {
+          // Opens the existing user-settings popup the same way the
+          // dock avatar does — PluginLayout listens for this event.
+          try { window.dispatchEvent(new CustomEvent('ghost-open-settings')); } catch { /* SSR */ }
+        }}
+      />
 
       {/* Storage usage */}
       <StorageBar />

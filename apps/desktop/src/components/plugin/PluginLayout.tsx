@@ -17,6 +17,8 @@ import { useNotifications } from '../../hooks/useNotifications';
 import { useCursorTracking } from '../../hooks/useCursorTracking';
 import { useSamplePacks } from '../../hooks/useSamplePacks';
 import { useWebRTC } from '../../hooks/useWebRTC';
+import { useVoiceMic } from '../../hooks/useVoiceMic';
+import { useVoiceStore } from '../../stores/voiceStore';
 
 // Extracted components
 import ProjectListSidebar from '../layout/ProjectListSidebar';
@@ -152,6 +154,25 @@ function UndoRedoButtons() {
       </button>
     </>
   );
+}
+
+// Tiny hidden <audio> that plays a remote MediaStream. Mounted at
+// the PluginLayout root level so voice keeps playing even when the
+// VideoGrid panel is collapsed. The element's autoplay survives a
+// stream swap because the effect re-attaches srcObject whenever the
+// stream prop changes.
+function RemoteVoicePlayer({ stream }: { stream: MediaStream }) {
+  const ref = useRef<HTMLAudioElement | null>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    if (el.srcObject !== stream) el.srcObject = stream;
+    // Some browsers won't autoplay audio without a user gesture.
+    // Treat the play() promise as best-effort; failure just means
+    // audio waits for the next user interaction.
+    el.play().catch(() => { /* user gesture pending */ });
+  }, [stream]);
+  return <audio ref={ref} autoPlay playsInline />;
 }
 
 function DockButton({ title, active, onClick, children }: { title: string; active: boolean; onClick: () => void; children: React.ReactNode }) {
@@ -361,6 +382,27 @@ export default function PluginLayout() {
     if (remoteActivityCount > 0 && videoGridHidden) setVideoGridHidden(false);
   }, [remoteActivityCount]);
 
+  // Voice mic — auto-acquires on session join via sessionStore. Hook
+  // writes its state into useVoiceStore; publish the mic stream to
+  // every other online user's peer via the existing useWebRTC pipe
+  // when it becomes available, so audio is heard the moment the user
+  // enters the project.
+  useVoiceMic();
+  const voiceStream = useVoiceStore((s) => s.stream);
+  useEffect(() => {
+    if (!voiceStream || !currentProjectId || !user?.id) return;
+    // No active camera publishing? Use publishStream to send the
+    // mic-only stream as a "camera" track. If a camera stream is
+    // already active, the existing replaceStream path keeps audio
+    // routed via the camera mic.
+    const otherUserIds = onlineUsers.filter((u) => u.userId !== user.id).map((u) => u.userId);
+    if (otherUserIds.length === 0) return;
+    webrtc.publishStream(voiceStream, otherUserIds).catch((err) => devWarn('PluginLayout.publishVoice', err));
+    return () => {
+      webrtc.stopStream();
+    };
+  }, [voiceStream, currentProjectId, user?.id, onlineUsers, webrtc]);
+
   const audioCleanup = useAudioStore((s) => s.cleanup);
   const members = currentProject?.members || [];
 
@@ -422,6 +464,14 @@ export default function PluginLayout() {
     };
     window.addEventListener('ghost-open-profile', openProfile);
     return () => window.removeEventListener('ghost-open-profile', openProfile);
+  }, []);
+
+  // Settings gear in the sidebar's UserVoiceBar dispatches this event
+  // to mirror the dock avatar's behaviour.
+  useEffect(() => {
+    const openSettings = () => { setShowSettings(true); setShowNotifs(false); };
+    window.addEventListener('ghost-open-settings', openSettings);
+    return () => window.removeEventListener('ghost-open-settings', openSettings);
   }, []);
 
   // Always land on WelcomeHero when the plugin opens — user picks a project
@@ -1157,6 +1207,16 @@ export default function PluginLayout() {
         onInviteClick={acceptInviteNudge}
         onDismiss={dismissInviteNudge}
       />
+
+      {/* Remote voice players. Hidden <audio> elements that always
+          play remote camera/voice streams regardless of whether the
+          floating VideoGrid panel is open — Discord-style: voice is
+          always audible while you're in the session. */}
+      <div style={{ position: 'absolute', width: 0, height: 0, overflow: 'hidden' }}>
+        {Array.from(webrtc.remoteStreams.entries()).map(([uid, stream]) => (
+          <RemoteVoicePlayer key={uid} stream={stream} />
+        ))}
+      </div>
 
       {/* Transport bar */}
       {selectedProjectId && currentProject && (
