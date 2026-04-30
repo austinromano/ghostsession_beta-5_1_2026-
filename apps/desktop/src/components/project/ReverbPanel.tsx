@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import {
   defaultParams,
@@ -6,6 +6,7 @@ import {
   type Effect,
   type ReverbParams,
 } from '../../stores/effectsStore';
+import { getLaneReverbAnalyser } from '../../stores/audio/trackReverb';
 
 // Reverb panel — visual + DSP. Matches the user-supplied reference:
 //
@@ -69,6 +70,40 @@ export default function ReverbPanel({
 
   const { size, decay, mix, time, damping, width } = params;
   const dimmed = effect.bypassed ? 0.5 : 1;
+
+  // Audio-reactive energy (0..1). Read RMS of the lane's pre-reverb
+  // signal off the shared analyser, smooth it lightly, and pass it
+  // down so the visualizer's motion components animate to the room
+  // amplitude. Decays gracefully when audio stops so the dashed
+  // wireframe "tail" eases back to rest instead of snapping.
+  const [energy, setEnergy] = useState(0);
+  useEffect(() => {
+    if (effect.bypassed) { setEnergy(0); return; }
+    const buf = new Uint8Array(512);
+    let raf = 0;
+    let smoothed = 0;
+    const loop = () => {
+      const an = getLaneReverbAnalyser(laneKey);
+      let rms = 0;
+      if (an) {
+        an.getByteTimeDomainData(buf as unknown as Uint8Array<ArrayBuffer>);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const v = (buf[i] - 128) / 128;
+          sum += v * v;
+        }
+        rms = Math.sqrt(sum / buf.length);
+      }
+      // Asymmetric smoothing — fast attack, slow release so the room
+      // animation has perceptible "tail" between hits.
+      const a = rms > smoothed ? 0.45 : 0.08;
+      smoothed = smoothed * (1 - a) + rms * a;
+      setEnergy(Math.min(1, smoothed * 2.5));
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => cancelAnimationFrame(raf);
+  }, [laneKey, effect.bypassed]);
 
   return (
     <div
@@ -145,7 +180,7 @@ export default function ReverbPanel({
         {/* Left column */}
         <div className="flex flex-col flex-1 min-w-0">
           <div className="flex px-1 pt-2 pb-1" style={{ height: 130 }}>
-            <RoomVisualizer size={size} decay={decay} mix={mix} />
+            <RoomVisualizer size={size} decay={decay} mix={mix} energy={energy} />
           </div>
           {/* Bottom knob row — Mix / Time / Damping. */}
           <div
@@ -212,7 +247,7 @@ export default function ReverbPanel({
 // scaled by `size`. The whole stack opacity scales with `mix` so a dry
 // reverb fades back into the floor. Framer Motion animates layer
 // transitions when params change.
-function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix: number }) {
+function RoomVisualizer({ size, decay, mix, energy }: { size: number; decay: number; mix: number; energy: number }) {
   // Wider viewBox so the SVG fills the body-row width without
   // preserveAspectRatio="meet" creating big letterbox bars on the
   // sides. cx auto-recenters, so layer geometry stays correct.
@@ -278,14 +313,39 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
           </radialGradient>
         </defs>
 
-        {/* Soft ambient floor glow under the base */}
-        <ellipse
+        {/* Soft ambient floor glow under the base — pulses with the
+            input energy so loud hits brighten the floor. */}
+        <motion.ellipse
           cx={cx} cy={baseY + 8}
           rx={(layers[0]?.halfW ?? 80) * 1.5}
           ry={20}
           fill="url(#roomGlowGrad)"
-          opacity={0.5 * mix + 0.18}
+          animate={{
+            opacity: 0.5 * mix + 0.18 + energy * 0.55,
+            scale: 1 + energy * 0.18,
+          }}
+          transition={{ type: 'tween', duration: 0.08, ease: 'linear' }}
+          style={{ originX: '50%', originY: '100%' }}
         />
+
+        {/* Energy ring — emanates outward from the base on loud
+            transients. Modeled as a flat iso-diamond outline whose
+            scale + opacity tracks energy. Sits BEHIND the layers so
+            it reads as light spilling out of the room. */}
+        {layers[0] && (
+          <motion.path
+            d={`M ${cx - layers[0].halfW} ${baseY} L ${cx} ${baseY - layers[0].halfH} L ${cx + layers[0].halfW} ${baseY} L ${cx} ${baseY + layers[0].halfH} Z`}
+            fill="none"
+            stroke={ACCENT}
+            strokeWidth={1.2}
+            animate={{
+              opacity: energy * 0.55,
+              scale: 1 + energy * 0.45,
+            }}
+            transition={{ type: 'tween', duration: 0.1, ease: 'easeOut' }}
+            style={{ originX: `${cx}px`, originY: `${baseY}px`, transformBox: 'fill-box' as any }}
+          />
+        )}
 
         {/* Vertical perspective struts from the top wireframe down to
             the base — connect the four iso corners through every
@@ -312,7 +372,11 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
         })()}
 
         {/* Stacked layers, base → top. <motion.g> animates layer
-            transitions when params change. */}
+            transitions when params change AND tracks input energy:
+            solid layers brighten on hits, the dashed wireframe
+            layers expand outward to sell the "ceiling rises with
+            the tail" feel. Higher layers move more (multiplied by
+            t) so the top of the room breathes the most. */}
         {layers.map((layer, i) => {
           const fillTop = layer.wireframe ? 'transparent' : 'url(#roomTopGrad)';
           const fillLeft = layer.wireframe ? 'transparent' : 'url(#roomLeftGrad)';
@@ -321,11 +385,21 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
             ? `rgba(168, 134, 255, ${layer.strokeOpacity})`
             : `rgba(232, 213, 255, ${layer.strokeOpacity})`;
           const dash = layer.wireframe ? '2 3' : undefined;
+          const t = i / Math.max(1, layers.length - 1);
+          // Solid layers: subtle brighten on hit. Wireframe layers:
+          // expand outward + brighten — they read as the reverb tail.
+          const baseOpacity = (layer.wireframe ? 1 : layer.fillOpacity / 0.6) * (0.35 + 0.65 * mix);
+          const energyBoost = layer.wireframe ? energy * 0.55 : energy * 0.30;
+          const scale = 1 + (layer.wireframe ? energy * 0.22 * (0.6 + t) : energy * 0.06);
           return (
             <motion.g
               key={`layer-${i}`}
-              animate={{ opacity: (layer.wireframe ? 1 : layer.fillOpacity / 0.6) * (0.35 + 0.65 * mix) }}
-              transition={{ type: 'spring', stiffness: 180, damping: 22 }}
+              animate={{
+                opacity: Math.min(1, baseOpacity + energyBoost),
+                scale,
+              }}
+              transition={{ type: 'spring', stiffness: 220, damping: 20, mass: 0.6 }}
+              style={{ originX: `${cx}px`, originY: `${layer.y}px`, transformBox: 'fill-box' as any }}
             >
               <PerspectivePlane
                 cx={cx}

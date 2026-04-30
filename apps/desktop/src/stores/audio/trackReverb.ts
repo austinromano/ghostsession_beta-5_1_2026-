@@ -53,6 +53,28 @@ interface TrackReverbEntry {
 
 const registry = new Map<string /* trackId */, TrackReverbEntry>();
 
+// Lane-shared input analyser. Every clip on the lane forks its
+// pre-reverb signal into this so the panel's visualizer reads the
+// lane's audio regardless of which clip is currently playing.
+const laneAnalysers = new Map<string /* laneKey */, AnalyserNode>();
+
+function getOrCreateLaneAnalyser(ctx: AudioContext, laneKey: string): AnalyserNode {
+  let a = laneAnalysers.get(laneKey);
+  if (!a) {
+    a = ctx.createAnalyser();
+    a.fftSize = 512;
+    a.smoothingTimeConstant = 0.6;
+    laneAnalysers.set(laneKey, a);
+  }
+  return a;
+}
+
+/** Lane-shared analyser sitting at the head of the reverb chain. Drives
+ * the ReverbPanel's Framer-Motion visualizer. */
+export function getLaneReverbAnalyser(laneKey: string): AnalyserNode | null {
+  return laneAnalysers.get(laneKey) ?? null;
+}
+
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
@@ -139,6 +161,11 @@ export function buildTrackReverbChain(
   const mix = clamp(params.mix, 0, 1);
   dry.gain.value = 1 - mix;
   wet.gain.value = bypassed ? 0 : mix;
+
+  // Tap the shared lane analyser off the chain input. AnalyserNode is
+  // transparent so this parallel branch doesn't colour the dry path.
+  const laneAnalyser = getOrCreateLaneAnalyser(ctx, laneKey);
+  splitter.connect(laneAnalyser);
 
   // Wire dry path
   splitter.connect(dry);
@@ -280,4 +307,6 @@ export function removeTrackReverb(trackId: string): void {
 export function disposeAllTrackReverb(): void {
   registry.forEach((_, trackId) => removeTrackReverb(trackId));
   registry.clear();
+  laneAnalysers.forEach((a) => { try { a.disconnect(); } catch { /* ignore */ } });
+  laneAnalysers.clear();
 }
