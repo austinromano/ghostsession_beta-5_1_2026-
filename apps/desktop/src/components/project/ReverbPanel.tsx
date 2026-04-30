@@ -197,7 +197,10 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
   const VIEW_W = 280;
   const VIEW_H = 140;
   const cx = VIEW_W / 2;
-  const baseY = VIEW_H * 0.84;
+  // Base diamond is centred so its bottom edge stays inside the
+  // viewBox at every size. baseY plus the largest possible halfH
+  // (set below) leaves a small floor margin for the ambient glow.
+  const baseY = VIEW_H * 0.74;
 
   // Five floating layers — the bottom three form the main "room"
   // step-pyramid; the top two render as faint dashed wireframes that
@@ -206,10 +209,13 @@ function RoomVisualizer({ size, decay, mix }: { size: number; decay: number; mix
     const n = 5;
     const out: Array<{ halfW: number; halfH: number; y: number; fillOpacity: number; strokeOpacity: number; wireframe: boolean }> = [];
     // Bigger base + wider vertical spread so the pyramid fills the
-    // viewport instead of bunching at the floor.
+    // viewport instead of bunching at the floor. halfH is bounded
+    // independently of halfW so the base diamond never overshoots
+    // the SVG floor at maximum size.
     const baseHalfW = 50 + size * 90;        // 50..140
-    const baseHalfH = baseHalfW * 0.42;
-    const vertSpacing = 14 + decay * 22;     // 14..36
+    const baseHalfH = 14 + size * 16;        // 14..30 — flat enough that
+                                             // baseY + halfH stays in view
+    const vertSpacing = 12 + decay * 18;     // 12..30
     // Layer 0 = base (largest, brightest); layers grow smaller and
     // climb upward.
     for (let i = 0; i < n; i++) {
