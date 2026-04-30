@@ -412,7 +412,9 @@ export default function ChannelEqPanel({
           {/* Per-band spotlight beams — vertical gradient strips that
               brighten with the energy at each band's centre frequency.
               Sit BEHIND the curve so they read as light spilling out
-              of the EQ from the band's column. */}
+              of the EQ from the band's column. pointer-events="none"
+              is set as an SVG attribute so the strips never intercept
+              drags targeted at the node circles. */}
           {bands.map((band, idx) => {
             const cx = freqToX(band.freq);
             const energy = bandEnergies[idx] ?? 0;
@@ -426,7 +428,7 @@ export default function ChannelEqPanel({
                 fill="url(#eqSpotlightGrad)"
                 animate={{ opacity: 0.04 + energy * 0.65 }}
                 transition={{ type: 'tween', duration: 0.06, ease: 'linear' }}
-                style={{ pointerEvents: 'none' }}
+                pointerEvents="none"
               />
             );
           })}
@@ -436,11 +438,12 @@ export default function ChannelEqPanel({
           {/* Curve */}
           <path d={curvePath} fill="none" stroke={accent} strokeWidth={1.6} strokeLinejoin="round" strokeLinecap="round" />
 
-          {/* Draggable band nodes. Each node has three layers:
-              - outer halo: pulses radius + opacity with band energy
-              - inner glow ring: subtle steady ring for visual weight
-              - core: the draggable node itself, spring-positioned so
-                non-drag updates (double-click reset) feel buttery */}
+          {/* Draggable band nodes. Two decorative layers (pulsing halo
+              + soft inner ring) sit behind a plain interactive circle.
+              The core stays a non-motion <circle> so its DOM cx/cy
+              attributes are exact every frame — Framer's spring on cx/cy
+              caused the visual position to lag the hit-test target,
+              and the user couldn't grab the node. */}
           {bands.map((band, idx) => {
             const cx = freqToX(band.freq);
             const cy = gainToY(band.gain);
@@ -457,7 +460,7 @@ export default function ChannelEqPanel({
                     opacity: 0.16 + energy * 0.40,
                   }}
                   transition={{ type: 'spring', stiffness: 220, damping: 16 }}
-                  style={{ pointerEvents: 'none' }}
+                  pointerEvents="none"
                 />
                 <circle
                   cx={cx}
@@ -465,24 +468,18 @@ export default function ChannelEqPanel({
                   r={9}
                   fill="rgba(168,85,247,0.18)"
                   stroke="none"
-                  style={{ pointerEvents: 'none' }}
+                  pointerEvents="none"
                 />
-                <motion.circle
-                  initial={false}
-                  animate={{ cx, cy }}
-                  transition={{ type: 'spring', stiffness: 600, damping: 34 }}
+                <circle
+                  cx={cx}
+                  cy={cy}
                   r={5.5}
                   fill="url(#eqNodeGrad)"
                   stroke="rgba(255,255,255,0.85)"
                   strokeWidth={1.2}
-                  whileHover={{ scale: 1.18 }}
-                  whileTap={{ scale: 1.10 }}
                   style={{
                     cursor: 'grab',
                     filter: `drop-shadow(0 0 ${4 + energy * 10}px ${accent})`,
-                    originX: `${cx}px`,
-                    originY: `${cy}px`,
-                    transformBox: 'fill-box' as any,
                   }}
                   onPointerDown={onPointerDown(idx)}
                   onDoubleClick={onDoubleClickNode(idx)}
