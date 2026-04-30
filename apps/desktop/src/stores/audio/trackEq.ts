@@ -23,13 +23,31 @@ interface TrackEqEntry {
   filters: BiquadFilterNode[];   // exactly 4
   storedGains: number[];         // exactly 4 — last unbypassed gain per band
   bypassed: boolean;
-  // Analyser sits at the head of the chain so the visualizer can read
-  // the signal entering the EQ. AnalyserNode is spec'd as transparent,
-  // so its presence in series doesn't colour the audio.
-  analyser: AnalyserNode;
+  // Per-clip input passthrough — taps the shared lane analyser in
+  // parallel and feeds the filter chain. Kept here for tear-down.
+  input: GainNode;
 }
 
 const registry = new Map<string /* trackId */, TrackEqEntry>();
+
+// Persistent per-lane analyser. Every clip on the same lane funnels
+// its pre-EQ signal into this one node, so the visualizer sees the
+// LANE's audio — not just the currently-selected clip's. Lives across
+// playback restarts and clip changes; only disposed on full cleanup.
+const laneAnalysers = new Map<string /* laneKey */, AnalyserNode>();
+
+function getOrCreateLaneAnalyser(ctx: AudioContext, laneKey: string): AnalyserNode {
+  let a = laneAnalysers.get(laneKey);
+  if (!a) {
+    a = ctx.createAnalyser();
+    a.fftSize = 2048;
+    a.smoothingTimeConstant = 0.75;
+    a.minDecibels = -90;
+    a.maxDecibels = -10;
+    laneAnalysers.set(laneKey, a);
+  }
+  return a;
+}
 
 const FILTER_Q = 1.0;            // peaking width — matches the visual sigma roughly
 const MIN_FREQ = 20;
@@ -75,33 +93,31 @@ export function buildTrackEqChain(
     filters[i].connect(filters[i + 1]);
   }
 
-  // Visualizer tap: AnalyserNode at the head of the chain. The audio
-  // store wires source → gain → pan → eqInput, so this analyser sees
-  // exactly what enters the EQ. fftSize 2048 gives ~22 Hz resolution
-  // at 48 kHz which is plenty for a log-frequency spectrum render.
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0.75;
-  analyser.minDecibels = -90;
-  analyser.maxDecibels = -10;
-  analyser.connect(filters[0]);
+  // Lane-scoped visualizer tap. Each clip's chain forks its input into
+  // (a) a shared lane analyser — parallel branch, audio doesn't go
+  // anywhere from there; AnalyserNode is transparent so the fork itself
+  // doesn't colour the signal — and (b) the filter chain. All clips on
+  // the lane share one analyser, so the panel sees lane audio whichever
+  // clip is currently producing it.
+  const laneAnalyser = getOrCreateLaneAnalyser(ctx, laneKey);
+  const input = ctx.createGain();
+  input.gain.value = 1;
+  input.connect(laneAnalyser);
+  input.connect(filters[0]);
 
-  registry.set(trackId, { laneKey, filters, storedGains, bypassed, analyser });
+  registry.set(trackId, { laneKey, filters, storedGains, bypassed, input });
 
-  return { input: analyser, output: filters[filters.length - 1] };
+  return { input, output: filters[filters.length - 1] };
 }
 
 /**
- * Pick the first analyser belonging to a given lane. Used by the
- * Channel EQ panel to drive its visualizer. Returns null when no
- * clip in the lane has been registered yet (i.e. before playback
- * has started for the first time after adding the EQ).
+ * Lane-scoped analyser shared by every clip on the lane. Persists
+ * across playback restarts so the visualizer keeps reading the same
+ * node — and sees audio from whichever clip on the lane is playing.
+ * Returns null only if no clip on this lane has ever been built.
  */
 export function getLaneAnalyser(laneKey: string): AnalyserNode | null {
-  for (const entry of registry.values()) {
-    if (entry.laneKey === laneKey) return entry.analyser;
-  }
-  return null;
+  return laneAnalysers.get(laneKey) ?? null;
 }
 
 /**
@@ -161,25 +177,30 @@ export function setLaneEqBypass(laneKey: string, bypassed: boolean, ctx?: AudioC
   });
 }
 
-/** Disconnect + drop a single track's chain. Called on playback restart. */
+/** Disconnect + drop a single track's chain. Called on playback restart.
+ * The lane analyser is INTENTIONALLY left alive — it's shared across
+ * clips and we want it persistent so the visualizer reads the same
+ * node every frame. */
 export function removeTrackEq(trackId: string): void {
   const entry = registry.get(trackId);
   if (!entry) return;
-  try { entry.analyser.disconnect(); } catch { /* ignore */ }
+  try { entry.input.disconnect(); } catch { /* ignore */ }
   for (const f of entry.filters) {
     try { f.disconnect(); } catch { /* ignore */ }
   }
   registry.delete(trackId);
 }
 
-/** Wipe the entire registry. Called on cleanup() so a project switch
- * doesn't carry orphan filters into the next session. */
+/** Wipe the entire registry + lane analysers. Called on cleanup() so
+ * a project switch doesn't carry orphan filters into the next session. */
 export function disposeAllTrackEq(): void {
   registry.forEach((entry) => {
-    try { entry.analyser.disconnect(); } catch { /* ignore */ }
+    try { entry.input.disconnect(); } catch { /* ignore */ }
     for (const f of entry.filters) {
       try { f.disconnect(); } catch { /* ignore */ }
     }
   });
   registry.clear();
+  laneAnalysers.forEach((a) => { try { a.disconnect(); } catch { /* ignore */ } });
+  laneAnalysers.clear();
 }

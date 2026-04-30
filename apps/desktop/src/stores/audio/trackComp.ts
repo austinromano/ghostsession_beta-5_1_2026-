@@ -26,14 +26,46 @@ interface TrackCompEntry {
   laneKey: string;
   compressor: DynamicsCompressorNode;
   makeup: GainNode;
-  analyser: AnalyserNode;
-  outputAnalyser: AnalyserNode;
+  // Per-clip input/output passthroughs. They tap the shared lane
+  // analysers in parallel and feed the per-clip dynamics chain. Held
+  // here for tear-down on playback restart.
+  input: GainNode;
+  output: GainNode;
   bypassed: boolean;
   storedRatio: number;
   storedMakeupDb: number;
 }
 
 const registry = new Map<string /* trackId */, TrackCompEntry>();
+
+// Lane-scoped, persistent analyser pair. Every clip on the same lane
+// summates into these so the panel's IN / OUT meters + the scrolling
+// waveform read whichever clip is currently producing audio — not
+// just the selected one. Lives across playback restarts.
+const laneInputAnalysers = new Map<string /* laneKey */, AnalyserNode>();
+const laneOutputAnalysers = new Map<string /* laneKey */, AnalyserNode>();
+// Latest reduction (dB, ≤ 0) per lane, mirrored from whichever clip's
+// compressor on the lane is most active. Polled by the GR meter.
+const laneReductions = new Map<string /* laneKey */, () => number>();
+
+function makeLaneAnalyser(ctx: AudioContext): AnalyserNode {
+  const a = ctx.createAnalyser();
+  a.fftSize = 1024;
+  a.smoothingTimeConstant = 0.4;
+  return a;
+}
+
+function getOrCreateLaneInputAnalyser(ctx: AudioContext, laneKey: string): AnalyserNode {
+  let a = laneInputAnalysers.get(laneKey);
+  if (!a) { a = makeLaneAnalyser(ctx); laneInputAnalysers.set(laneKey, a); }
+  return a;
+}
+
+function getOrCreateLaneOutputAnalyser(ctx: AudioContext, laneKey: string): AnalyserNode {
+  let a = laneOutputAnalysers.get(laneKey);
+  if (!a) { a = makeLaneAnalyser(ctx); laneOutputAnalysers.set(laneKey, a); }
+  return a;
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
@@ -66,18 +98,7 @@ export function buildTrackCompChain(
 ): { input: AudioNode; output: AudioNode } {
   removeTrackComp(trackId);
 
-  const analyser = ctx.createAnalyser();
-  analyser.fftSize = 1024;
-  analyser.smoothingTimeConstant = 0.4;
-
-  const outputAnalyser = ctx.createAnalyser();
-  outputAnalyser.fftSize = 1024;
-  outputAnalyser.smoothingTimeConstant = 0.4;
-
   const compressor = ctx.createDynamicsCompressor();
-  // DynamicsCompressorNode allows ratio 1..20, threshold -100..0,
-  // attack 0..1 s, release 0..1 s, knee 0..40 dB. We use a hard knee
-  // so the curve in the UI matches the audio behavior.
   compressor.threshold.value = clamp(params.threshold, -60, 0);
   compressor.ratio.value = bypassed ? 1 : clamp(params.ratio, 1, 20);
   compressor.attack.value = clamp(params.attack, 1, 200) / 1000;
@@ -88,23 +109,39 @@ export function buildTrackCompChain(
   const makeup = ctx.createGain();
   makeup.gain.value = dbToLinear(makeupDb);
 
-  // Wire: analyser(in) → compressor → makeup → outputAnalyser
-  analyser.connect(compressor);
+  // Per-clip passthrough gains. The shared lane analysers are tapped
+  // off these in parallel so any clip on the lane drives the visualizer.
+  const input = ctx.createGain();
+  const output = ctx.createGain();
+
+  const laneIn = getOrCreateLaneInputAnalyser(ctx, laneKey);
+  const laneOut = getOrCreateLaneOutputAnalyser(ctx, laneKey);
+
+  // Wire (audio path):  input → compressor → makeup → output
+  // Wire (taps):        input → laneIn (parallel),  output → laneOut (parallel)
+  input.connect(compressor);
   compressor.connect(makeup);
-  makeup.connect(outputAnalyser);
+  makeup.connect(output);
+  input.connect(laneIn);
+  output.connect(laneOut);
+
+  // Mirror this clip's reduction into the lane's getter. Last-built
+  // wins, but clips on the lane share the same effective threshold so
+  // any of them is representative.
+  laneReductions.set(laneKey, () => compressor.reduction);
 
   const entry: TrackCompEntry = {
     laneKey,
     compressor,
     makeup,
-    analyser,
-    outputAnalyser,
+    input,
+    output,
     bypassed,
     storedRatio: clamp(params.ratio, 1, 20),
     storedMakeupDb: makeupDb,
   };
   registry.set(trackId, entry);
-  return { input: analyser, output: outputAnalyser };
+  return { input, output };
 }
 
 /**
@@ -160,49 +197,51 @@ export function setLaneCompBypass(laneKey: string, bypassed: boolean, ctx?: Audi
   });
 }
 
-/** Look up the input analyser for the lane's comp. Drives the
- * CompressorPanel input level meter. */
+/** Lane-shared input analyser — drives the IN meter + the input side
+ * of the scrolling waveform. Persistent so the panel reads from the
+ * same node across plays + sees whichever clip on the lane is playing. */
 export function getLaneCompAnalyser(laneKey: string): AnalyserNode | null {
-  for (const entry of registry.values()) {
-    if (entry.laneKey === laneKey) return entry.analyser;
-  }
-  return null;
+  return laneInputAnalysers.get(laneKey) ?? null;
 }
 
-/** Output analyser — drives the OUT meter and the post-comp portion
- * of the scrolling waveform behind the transfer curve. */
+/** Lane-shared output analyser — drives the OUT meter and the post-comp
+ * portion of the scrolling waveform behind the transfer curve. */
 export function getLaneCompOutputAnalyser(laneKey: string): AnalyserNode | null {
-  for (const entry of registry.values()) {
-    if (entry.laneKey === laneKey) return entry.outputAnalyser;
-  }
-  return null;
+  return laneOutputAnalysers.get(laneKey) ?? null;
 }
 
-/** Latest gain-reduction (dB, ≤ 0) directly from the
- * DynamicsCompressorNode.reduction field. Drives the GR meter. */
+/** Latest gain-reduction (dB, ≤ 0) for the lane. Reads through a
+ * lane-keyed getter so the value reflects the most recently-built
+ * clip's compressor on that lane. */
 export function getLaneCompEnvelope(laneKey: string): number {
-  for (const entry of registry.values()) {
-    if (entry.laneKey === laneKey) return entry.compressor.reduction;
-  }
-  return 0;
+  const fn = laneReductions.get(laneKey);
+  return fn ? fn() : 0;
 }
 
+/** Tear down a single clip's compressor chain. Lane analysers are
+ * INTENTIONALLY left alive so the visualizer keeps reading the same
+ * persistent node across playback restarts. */
 export function removeTrackComp(trackId: string): void {
   const entry = registry.get(trackId);
   if (!entry) return;
-  try { entry.analyser.disconnect(); } catch { /* ignore */ }
+  try { entry.input.disconnect(); } catch { /* ignore */ }
   try { entry.compressor.disconnect(); } catch { /* ignore */ }
   try { entry.makeup.disconnect(); } catch { /* ignore */ }
-  try { entry.outputAnalyser.disconnect(); } catch { /* ignore */ }
+  try { entry.output.disconnect(); } catch { /* ignore */ }
   registry.delete(trackId);
 }
 
 export function disposeAllTrackComp(): void {
   registry.forEach((entry) => {
-    try { entry.analyser.disconnect(); } catch { /* ignore */ }
+    try { entry.input.disconnect(); } catch { /* ignore */ }
     try { entry.compressor.disconnect(); } catch { /* ignore */ }
     try { entry.makeup.disconnect(); } catch { /* ignore */ }
-    try { entry.outputAnalyser.disconnect(); } catch { /* ignore */ }
+    try { entry.output.disconnect(); } catch { /* ignore */ }
   });
   registry.clear();
+  laneInputAnalysers.forEach((a) => { try { a.disconnect(); } catch { /* ignore */ } });
+  laneInputAnalysers.clear();
+  laneOutputAnalysers.forEach((a) => { try { a.disconnect(); } catch { /* ignore */ } });
+  laneOutputAnalysers.clear();
+  laneReductions.clear();
 }
