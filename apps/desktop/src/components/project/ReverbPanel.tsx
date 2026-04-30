@@ -180,7 +180,11 @@ export default function ReverbPanel({
         {/* Left column */}
         <div className="flex flex-col flex-1 min-w-0">
           <div className="flex px-1 pt-2 pb-1" style={{ height: 130 }}>
-            <RoomVisualizer size={size} decay={decay} mix={mix} energy={energy} />
+            <ParticleRoom
+              size={size} decay={decay} mix={mix}
+              time={time} damping={damping} width={width}
+              energy={energy}
+            />
           </div>
           {/* Bottom knob row — Mix / Time / Damping. */}
           <div
@@ -243,239 +247,193 @@ export default function ReverbPanel({
   );
 }
 
-// 3D isometric step-pyramid visualization. Each layer is a parallelogram
-// scaled by `size`. The whole stack opacity scales with `mix` so a dry
-// reverb fades back into the floor. Framer Motion animates layer
-// transitions when params change.
-function RoomVisualizer({ size, decay, mix, energy }: { size: number; decay: number; mix: number; energy: number }) {
-  // Wider viewBox so the SVG fills the body-row width without
-  // preserveAspectRatio="meet" creating big letterbox bars on the
-  // sides. cx auto-recenters, so layer geometry stays correct.
-  const VIEW_W = 380;
-  const VIEW_H = 140;
-  const cx = VIEW_W / 2;
-  // Base diamond is centred so its bottom edge stays inside the
-  // viewBox at every size. baseY plus the largest possible halfH
-  // (set below) leaves a small floor margin for the ambient glow.
-  const baseY = VIEW_H * 0.74;
+// Canvas-based particle-dispersion visualizer. Each reverb param drives
+// a different aspect of particle physics so the visualization reads as
+// the room responding to the audio:
+//
+//   mix     → spawn density (more wet = more particles)
+//   time    → particle lifetime (long time = particles linger)
+//   damping → friction (high damping = particles slow & stop fast)
+//   size    → initial vertical velocity + particle radius (room scale)
+//   decay   → alpha-decay curve steepness (visual fade shape)
+//   width   → horizontal velocity spread (stereo width)
+//   energy  → spawn rate boost + transient burst trigger
+//
+// Implementation notes:
+// - A single radial-gradient sprite is pre-rendered once and blitted
+//   per-particle via drawImage with globalAlpha. Drawing ~hundreds of
+//   gradients per frame would otherwise dominate frame time.
+// - The frame is composited with a translucent black rect each tick
+//   instead of a full clear, so trailing particles bleed into a soft
+//   smoke trail. Also keeps the floor area readable when idle.
+function ParticleRoom({
+  size, decay, mix, time, damping, width, energy,
+}: {
+  size: number; decay: number; mix: number;
+  time: number; damping: number; width: number;
+  energy: number;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  // The RAF loop reads params via this ref so we don't have to
+  // teardown/re-init on every slider tick. React updates the ref each
+  // render; the loop reads the latest values next frame.
+  const paramsRef = useRef({ size, decay, mix, time, damping, width, energy });
+  paramsRef.current = { size, decay, mix, time, damping, width, energy };
 
-  // Five floating layers — the bottom three form the main "room"
-  // step-pyramid; the top two render as faint dashed wireframes that
-  // suggest the open ceiling space, matching the reference image.
-  const layers = useMemo(() => {
-    const n = 5;
-    const out: Array<{ halfW: number; halfH: number; y: number; fillOpacity: number; strokeOpacity: number; wireframe: boolean }> = [];
-    // Bigger base + wider vertical spread so the pyramid fills the
-    // viewport instead of bunching at the floor. halfH is bounded
-    // independently of halfW so the base diamond never overshoots
-    // the SVG floor at maximum size.
-    const baseHalfW = 50 + size * 90;        // 50..140
-    const baseHalfH = 14 + size * 16;        // 14..30 — flat enough that
-                                             // baseY + halfH stays in view
-    const vertSpacing = 12 + decay * 18;     // 12..30
-    // Layer 0 = base (largest, brightest); layers grow smaller and
-    // climb upward.
-    for (let i = 0; i < n; i++) {
-      const t = i / (n - 1);                 // 0..1 from base to top
-      const halfW = baseHalfW * (1 - t * 0.78);
-      const halfH = baseHalfH * (1 - t * 0.78);
-      const y = baseY - i * vertSpacing;
-      const wireframe = i >= 3;              // top two layers
-      const fillOpacity = wireframe ? 0 : (0.25 + (1 - t) * 0.35);
-      const strokeOpacity = wireframe ? 0.22 + (1 - t) * 0.18 : 0.45 + (1 - t) * 0.20;
-      out.push({ halfW, halfH, y, fillOpacity, strokeOpacity, wireframe });
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d', { alpha: true });
+    if (!ctx) return;
+
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = canvas.clientWidth;
+    const H = canvas.clientHeight;
+    canvas.width = Math.max(1, Math.floor(W * dpr));
+    canvas.height = Math.max(1, Math.floor(H * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // Pre-render a soft purple particle sprite once. Blitted per
+    // particle per frame — much cheaper than recreating gradients.
+    const SPRITE = 64;
+    const sprite = document.createElement('canvas');
+    sprite.width = SPRITE;
+    sprite.height = SPRITE;
+    const sctx = sprite.getContext('2d');
+    if (sctx) {
+      const g = sctx.createRadialGradient(SPRITE / 2, SPRITE / 2, 0, SPRITE / 2, SPRITE / 2, SPRITE / 2);
+      g.addColorStop(0, 'rgba(232, 213, 255, 1)');
+      g.addColorStop(0.35, 'rgba(168, 85, 247, 0.55)');
+      g.addColorStop(1, 'rgba(124, 58, 237, 0)');
+      sctx.fillStyle = g;
+      sctx.fillRect(0, 0, SPRITE, SPRITE);
     }
-    return out;
-  }, [size, decay]);
 
-  const dBLabels = ['+20', '+10', '0', '-10', '-20', '-30'];
-  const msLabels = ['0', '10', '20', '30'];
+    interface Particle {
+      x: number; y: number;
+      vx: number; vy: number;
+      life: number;       // 1 → 0
+      lifetime: number;   // seconds
+      r: number;          // base radius (px)
+      hueJitter: number;  // small per-particle warmth offset
+    }
+    const particles: Particle[] = [];
+    const MAX_PARTICLES = 600;
+
+    let raf = 0;
+    let prev = performance.now();
+    let prevEnergy = 0;
+    let spawnAccum = 0;
+
+    const loop = (now: number) => {
+      const dt = Math.min(0.05, (now - prev) / 1000);
+      prev = now;
+      const p = paramsRef.current;
+
+      // Continuous spawn proportional to mix * energy. A transient
+      // burst fires when energy spikes, regardless of mix, so a hit
+      // always gets a visible response.
+      const continuousRate = p.mix * p.energy * 220;
+      const transient = Math.max(0, p.energy - prevEnergy - 0.04);
+      const burstRate = transient * 1800;
+      prevEnergy = p.energy;
+      spawnAccum += (continuousRate + burstRate) * dt;
+      let toSpawn = Math.floor(spawnAccum);
+      spawnAccum -= toSpawn;
+      if (particles.length + toSpawn > MAX_PARTICLES) {
+        toSpawn = Math.max(0, MAX_PARTICLES - particles.length);
+      }
+
+      // Param → physics mapping.
+      const lifetime = 0.45 + p.time * 1.6;          // seconds (Time)
+      const horizSpread = 25 + p.width * 130;        // px/s   (Width)
+      const vertVel = 60 + p.size * 140 + p.energy * 80;  // px/s (Size + impulse)
+      const baseR = 0.9 + p.size * 1.3 + p.mix * 0.4;     // px   (Size + Mix)
+      const fric = Math.exp(-p.damping * 3.5 * dt);  // friction (Damping)
+      const decayPow = 1 + p.decay * 3.2;            // alpha-curve (Decay)
+
+      for (let i = 0; i < toSpawn; i++) {
+        // Spawn from a thin band near the floor, biased to the centre.
+        const sx = W * 0.5 + (Math.random() - 0.5) * W * 0.55;
+        const sy = H * 0.92;
+        const angleSpread = (Math.random() - 0.5) * 1.6;  // -0.8..0.8 rad
+        // Combine angled emission with the width-controlled horizontal
+        // spread so width visibly changes the dispersion cone.
+        const speed = vertVel * (0.55 + Math.random() * 0.85);
+        particles.push({
+          x: sx,
+          y: sy,
+          vx: Math.sin(angleSpread) * horizSpread + (Math.random() - 0.5) * horizSpread * 0.6,
+          vy: -Math.cos(angleSpread) * speed,
+          life: 1,
+          lifetime,
+          r: baseR * (0.55 + Math.random() * 1.0),
+          hueJitter: Math.random() * 0.18 - 0.09,
+        });
+      }
+
+      // Trail: fade the previous frame instead of clearing fully so
+      // particles paint a soft smoke wake behind them.
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.fillStyle = 'rgba(11, 8, 24, 0.28)';
+      ctx.fillRect(0, 0, W, H);
+
+      // Faint floor reference — a horizontal gradient line so the room
+      // reads as a "stage" the particles rise off of.
+      const floor = ctx.createLinearGradient(0, 0, W, 0);
+      floor.addColorStop(0, 'rgba(168, 85, 247, 0)');
+      floor.addColorStop(0.5, `rgba(168, 85, 247, ${0.22 + p.mix * 0.18 + p.energy * 0.20})`);
+      floor.addColorStop(1, 'rgba(168, 85, 247, 0)');
+      ctx.fillStyle = floor;
+      ctx.fillRect(0, H * 0.92, W, 0.8);
+
+      ctx.globalCompositeOperation = 'lighter';
+
+      for (let i = particles.length - 1; i >= 0; i--) {
+        const part = particles[i];
+        // Apply friction. High damping kills velocity quickly and
+        // particles "stick" — feels like wool absorbing the room.
+        part.vx *= fric;
+        part.vy *= fric;
+        part.x += part.vx * dt;
+        part.y += part.vy * dt;
+        part.life -= dt / part.lifetime;
+
+        if (part.life <= 0 || part.y < -8 || part.x < -16 || part.x > W + 16) {
+          particles.splice(i, 1);
+          continue;
+        }
+
+        const alpha = Math.pow(Math.max(0, part.life), decayPow);
+        const rPx = part.r * (0.7 + alpha * 0.7);
+        ctx.globalAlpha = alpha * 0.95;
+        const dest = rPx * 4;
+        ctx.drawImage(sprite, part.x - dest / 2, part.y - dest / 2, dest, dest);
+      }
+      ctx.globalAlpha = 1;
+
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   return (
-    <div className="relative shrink-0 grow" style={{ height: VIEW_H }}>
-      <svg viewBox={`0 0 ${VIEW_W} ${VIEW_H}`} width="100%" height={VIEW_H} preserveAspectRatio="xMidYMid meet" style={{ display: 'block' }}>
-        <defs>
-          <linearGradient id="roomTopGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor="#d8b4fe" stopOpacity="0.95" />
-            <stop offset="100%" stopColor={ACCENT} stopOpacity="0.55" />
-          </linearGradient>
-          <linearGradient id="roomLeftGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.55" />
-            <stop offset="100%" stopColor="#4c1d95" stopOpacity="0.30" />
-          </linearGradient>
-          <linearGradient id="roomRightGrad" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%" stopColor="#4c1d95" stopOpacity="0.28" />
-            <stop offset="100%" stopColor={ACCENT} stopOpacity="0.18" />
-          </linearGradient>
-          <radialGradient id="roomGlowGrad" cx="0.5" cy="1" r="0.7">
-            <stop offset="0%" stopColor={ACCENT} stopOpacity="0.50" />
-            <stop offset="100%" stopColor={ACCENT} stopOpacity="0" />
-          </radialGradient>
-        </defs>
-
-        {/* Soft ambient floor glow under the base — pulses with the
-            input energy so loud hits brighten the floor. */}
-        <motion.ellipse
-          cx={cx} cy={baseY + 8}
-          rx={(layers[0]?.halfW ?? 80) * 1.5}
-          ry={20}
-          fill="url(#roomGlowGrad)"
-          animate={{
-            opacity: 0.5 * mix + 0.18 + energy * 0.55,
-            scale: 1 + energy * 0.18,
-          }}
-          transition={{ type: 'tween', duration: 0.08, ease: 'linear' }}
-          style={{ originX: '50%', originY: '100%' }}
-        />
-
-        {/* Energy ring — emanates outward from the base on loud
-            transients. Modeled as a flat iso-diamond outline whose
-            scale + opacity tracks energy. Sits BEHIND the layers so
-            it reads as light spilling out of the room. */}
-        {layers[0] && (
-          <motion.path
-            d={`M ${cx - layers[0].halfW} ${baseY} L ${cx} ${baseY - layers[0].halfH} L ${cx + layers[0].halfW} ${baseY} L ${cx} ${baseY + layers[0].halfH} Z`}
-            fill="none"
-            stroke={ACCENT}
-            strokeWidth={1.2}
-            animate={{
-              opacity: energy * 0.55,
-              scale: 1 + energy * 0.45,
-            }}
-            transition={{ type: 'tween', duration: 0.1, ease: 'easeOut' }}
-            style={{ originX: `${cx}px`, originY: `${baseY}px`, transformBox: 'fill-box' as any }}
-          />
-        )}
-
-        {/* Vertical perspective struts from the top wireframe down to
-            the base — connect the four iso corners through every
-            layer to read as a transparent box. */}
-        {(() => {
-          const top = layers[layers.length - 1];
-          const bot = layers[0];
-          if (!top || !bot) return null;
-          const struts = [
-            { x1: cx - top.halfW, y1: top.y, x2: cx - bot.halfW, y2: bot.y },
-            { x1: cx + top.halfW, y1: top.y, x2: cx + bot.halfW, y2: bot.y },
-            { x1: cx, y1: top.y - top.halfH, x2: cx, y2: bot.y - bot.halfH },
-            { x1: cx, y1: top.y + top.halfH, x2: cx, y2: bot.y + bot.halfH },
-          ];
-          return struts.map((s, i) => (
-            <line
-              key={`strut-${i}`}
-              x1={s.x1} y1={s.y1} x2={s.x2} y2={s.y2}
-              stroke="rgba(168, 134, 255, 0.16)"
-              strokeWidth={0.6}
-              strokeDasharray="2 3"
-            />
-          ));
-        })()}
-
-        {/* Stacked layers, base → top. <motion.g> animates layer
-            transitions when params change AND tracks input energy:
-            solid layers brighten on hits, the dashed wireframe
-            layers expand outward to sell the "ceiling rises with
-            the tail" feel. Higher layers move more (multiplied by
-            t) so the top of the room breathes the most. */}
-        {layers.map((layer, i) => {
-          const fillTop = layer.wireframe ? 'transparent' : 'url(#roomTopGrad)';
-          const fillLeft = layer.wireframe ? 'transparent' : 'url(#roomLeftGrad)';
-          const fillRight = layer.wireframe ? 'transparent' : 'url(#roomRightGrad)';
-          const stroke = layer.wireframe
-            ? `rgba(168, 134, 255, ${layer.strokeOpacity})`
-            : `rgba(232, 213, 255, ${layer.strokeOpacity})`;
-          const dash = layer.wireframe ? '2 3' : undefined;
-          const t = i / Math.max(1, layers.length - 1);
-          // Solid layers: subtle brighten on hit. Wireframe layers:
-          // expand outward + brighten — they read as the reverb tail.
-          const baseOpacity = (layer.wireframe ? 1 : layer.fillOpacity / 0.6) * (0.35 + 0.65 * mix);
-          const energyBoost = layer.wireframe ? energy * 0.55 : energy * 0.30;
-          const scale = 1 + (layer.wireframe ? energy * 0.22 * (0.6 + t) : energy * 0.06);
-          return (
-            <motion.g
-              key={`layer-${i}`}
-              animate={{
-                opacity: Math.min(1, baseOpacity + energyBoost),
-                scale,
-              }}
-              transition={{ type: 'spring', stiffness: 220, damping: 20, mass: 0.6 }}
-              style={{ originX: `${cx}px`, originY: `${layer.y}px`, transformBox: 'fill-box' as any }}
-            >
-              <PerspectivePlane
-                cx={cx}
-                y={layer.y}
-                halfW={layer.halfW}
-                halfH={layer.halfH}
-                fillTop={fillTop}
-                fillLeft={fillLeft}
-                fillRight={fillRight}
-                stroke={stroke}
-                strokeDasharray={dash}
-                showSides={!layer.wireframe && i > 0}
-                sideHeight={i === layers.length - 1 ? 0 : (layers[i + 1]?.y ?? layer.y) - layer.y}
-              />
-            </motion.g>
-          );
-        })}
-
-        {/* Y-axis labels — left = dB scale. Tucked in close to the
-            graph (cx) with a small margin off the SVG's left edge,
-            so the numbers read alongside the layer stack instead of
-            hugging the panel edge. */}
-        {dBLabels.map((label, i) => {
-          const topY = 22;
-          const bottomY = baseY + 6;
-          const y = topY + (i / (dBLabels.length - 1)) * (bottomY - topY);
-          return (
-            <text key={`db-${i}`} x={70} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="end">{label}</text>
-          );
-        })}
-        {/* Y-axis labels — right = ms scale. Mirrors the dB column;
-            sits ~70 px from the right edge of the SVG. */}
-        {msLabels.map((label, i) => {
-          const topY = 28;
-          const bottomY = baseY + 6;
-          const y = topY + (i / (msLabels.length - 1)) * (bottomY - topY);
-          return (
-            <text key={`ms-${i}`} x={VIEW_W - 70} y={y} fill="rgba(255,255,255,0.42)" fontSize={7.5} fontFamily="monospace" textAnchor="start">{label}</text>
-          );
-        })}
-      </svg>
+    <div className="relative shrink-0 grow" style={{ height: 130 }}>
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: '100%',
+          height: '100%',
+          display: 'block',
+          borderRadius: 6,
+          background: 'linear-gradient(180deg, rgba(20,14,42,1) 0%, rgba(11,8,24,1) 100%)',
+        }}
+      />
     </div>
   );
 }
 
-// One iso box top + optional left + right side faces. `sideHeight`
-// controls how much of the side is visible (between layers).
-function PerspectivePlane({
-  cx, y, halfW, halfH,
-  fillTop, fillLeft, fillRight, stroke,
-  strokeDasharray,
-  showSides = false, sideHeight = 0,
-}: {
-  cx: number; y: number; halfW: number; halfH: number;
-  fillTop: string; fillLeft: string; fillRight: string; stroke: string;
-  strokeDasharray?: string;
-  showSides?: boolean; sideHeight?: number;
-}) {
-  // Iso top face — diamond shape
-  const topPath = `M ${cx - halfW} ${y} L ${cx} ${y - halfH} L ${cx + halfW} ${y} L ${cx} ${y + halfH} Z`;
-  // Left side face (drops down from the bottom-left edge by sideHeight)
-  const leftPath = showSides && sideHeight > 0
-    ? `M ${cx - halfW} ${y} L ${cx} ${y + halfH} L ${cx} ${y + halfH + sideHeight} L ${cx - halfW} ${y + sideHeight} Z`
-    : '';
-  // Right side face
-  const rightPath = showSides && sideHeight > 0
-    ? `M ${cx + halfW} ${y} L ${cx} ${y + halfH} L ${cx} ${y + halfH + sideHeight} L ${cx + halfW} ${y + sideHeight} Z`
-    : '';
-  return (
-    <g>
-      {leftPath && <path d={leftPath} fill={fillLeft} stroke={stroke} strokeWidth={0.5} strokeDasharray={strokeDasharray} />}
-      {rightPath && <path d={rightPath} fill={fillRight} stroke={stroke} strokeWidth={0.5} strokeDasharray={strokeDasharray} />}
-      <path d={topPath} fill={fillTop} stroke={stroke} strokeWidth={0.8} strokeDasharray={strokeDasharray} />
-    </g>
-  );
-}
 
 // Round purple knob — drag vertically to change. Same visual idiom as
 // CompressorPanel's knob; copied here so the reverb panel can size
