@@ -364,6 +364,16 @@ interface AudioState {
 
 let startedAt = 0;
 let pausedAt = 0;
+// Per-track debounce timers for setTrackPitch's heavy WSOLA rebuild.
+// Rapid slider movement coalesces into ONE WSOLA pass once the user
+// stops moving — see setTrackPitch for rationale.
+const pitchCommitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+// Pitch the track's CURRENT buffer + warp markers were built/rescaled
+// for. Phase 1 of setTrackPitch updates `track.pitch` instantly (so
+// the live source's playbackRate can ramp) but the buffer/markers
+// stay at their last-committed scale — this map records that pitch
+// so phase 2 knows the correct old-factor when rescaling markers.
+const trackCommittedPitch = new Map<string, number>();
 let rafId: number | null = null;
 let loopTimer: ReturnType<typeof setTimeout> | null = null;
 const undoStack: UndoSnapshot[] = [];
@@ -1004,6 +1014,9 @@ export const useAudioStore = create<AudioState>((set, get) => {
       const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
       if (track?.source) safeStop(track.source);
+      const pendingTimer = pitchCommitTimers.get(trackId);
+      if (pendingTimer) { clearTimeout(pendingTimer); pitchCommitTimers.delete(trackId); }
+      trackCommittedPitch.delete(trackId);
       loadedTracks.delete(trackId);
       set({ loadedTracks: new Map(loadedTracks) });
       recalcDuration();
@@ -1213,38 +1226,79 @@ export const useAudioStore = create<AudioState>((set, get) => {
     },
 
     setTrackPitch: (trackId, semitones) => {
-      const { loadedTracks, projectBpm } = get();
+      // Two-phase commit: a slider drag fires this many times per
+      // second, so doing the WSOLA rebuild every time freezes the UI
+      // and starves the audio thread (silence on the pitched track
+      // for the duration of every stretch pass — accumulating into
+      // an off-grid drift the user reported as "warp breaks").
+      //
+      //   Phase 1 (instant): write the new pitch to the store and
+      //     ramp the live source's playbackRate to the new factor.
+      //     Audio responds immediately; pitch is briefly *coupled to
+      //     speed* during the drag (vinyl-style), which is fine.
+      //
+      //   Phase 2 (debounced): rebuild the play buffer via
+      //     composePlayBuffer and restart so duration is preserved
+      //     against the grid. Cancelled and rescheduled on every
+      //     subsequent pitch change, so a fast drag pays for ONE
+      //     stretch pass when the user releases — not one per tick.
+      const { loadedTracks } = get();
       const track = loadedTracks.get(trackId);
       if (!track) return;
       const pitch = Math.max(PITCH_MIN, Math.min(PITCH_MAX, semitones));
-      const m = new Map(loadedTracks);
-      // Rebuild the play buffer so the pitch shift preserves time. The
-      // pitch field is read by composePlayBuffer and combined with the
-      // current warp factor; the resulting buffer is `pitchFactor` longer
-      // than the warped length and gets played at `playbackRate=pitchFactor`.
-      if (track.source) safeStop(track.source);
-      if (track.gainNode) { try { track.gainNode.disconnect(); } catch { /* ignore */ } }
-      const oldLen = track.buffer.duration;
-      // Scale warp markers FIRST (by the pitch-factor change ratio) so
-      // composePlayBuffer's piecewise path uses the new musical positions.
-      const oldPitchFactor = Math.pow(2, (track.pitch || 0) / 12);
-      const newPitchFactor = Math.pow(2, pitch / 12);
-      const markerRatio = newPitchFactor / oldPitchFactor;
-      const scaledMarkers = rescaleWarpMarkers(track.warpMarkers, markerRatio);
-      const next = composePlayBuffer({ ...track, pitch, warpMarkers: scaledMarkers }, projectBpm);
-      // Scale trim by the buffer-length change. trimStart / trimEnd live in
-      // BUFFER seconds, so when the pre-stretch length changes (e.g. +12
-      // semitones doubles the buffer), the trim points have to scale by
-      // the same ratio or they'd point to the wrong musical position in
-      // the new buffer — and the visual clip width would shrink/grow with
-      // pitch instead of holding steady.
-      const ratio = oldLen > 0 ? next.buffer.duration / oldLen : 1;
-      const trimStart = track.trimStart * ratio;
-      const trimEnd = track.trimEnd * ratio; // 0 means "use full" — stays 0
-      m.set(trackId, { ...track, pitch, buffer: next.buffer, trimStart, trimEnd, warpMarkers: scaledMarkers, source: null, gainNode: null });
-      set({ loadedTracks: m, bufferVersion: get().bufferVersion + 1 });
-      restartIfPlaying();
-      window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+
+      // Phase 1 — instant. Update the store with just the new `pitch`
+      // value (preserving the existing buffer / trim / warpMarkers so
+      // the source keeps playing) and ramp the live playbackRate.
+      {
+        const m = new Map(loadedTracks);
+        m.set(trackId, { ...track, pitch });
+        set({ loadedTracks: m });
+        if (track.source) {
+          try {
+            const ctx = getCtx();
+            const t = ctx.currentTime;
+            const newRate = Math.pow(2, pitch / 12);
+            track.source.playbackRate.cancelScheduledValues(t);
+            track.source.playbackRate.linearRampToValueAtTime(newRate, t + 0.04);
+          } catch { /* ignore — source may have just ended */ }
+        }
+      }
+
+      // Phase 2 — debounced commit. Rebuilds the buffer + restarts so
+      // the duration stays grid-locked. 120 ms is short enough that
+      // a quick release feels responsive, long enough that a typical
+      // slider drag (continuous events at 16 ms cadence) collapses
+      // into a single stretch pass.
+      const prev = pitchCommitTimers.get(trackId);
+      if (prev) clearTimeout(prev);
+      pitchCommitTimers.set(trackId, setTimeout(() => {
+        pitchCommitTimers.delete(trackId);
+        const cur = get().loadedTracks.get(trackId);
+        if (!cur || cur.pitch !== pitch) return;
+        const m = new Map(get().loadedTracks);
+        if (cur.source) safeStop(cur.source);
+        if (cur.gainNode) { try { cur.gainNode.disconnect(); } catch { /* ignore */ } }
+        const oldLen = cur.buffer.duration;
+        // Marker rescale is relative to the LAST-COMMITTED pitch (the
+        // pitch the buffer/markers currently belong to), not to
+        // cur.pitch (which phase 1 has already advanced). Default to
+        // 0 for the first commit before this map has an entry.
+        const lastCommitted = trackCommittedPitch.get(trackId) ?? 0;
+        const oldPitchFactor = Math.pow(2, lastCommitted / 12);
+        const newPitchFactor = Math.pow(2, pitch / 12);
+        const markerRatio = newPitchFactor / oldPitchFactor;
+        const scaledMarkers = rescaleWarpMarkers(cur.warpMarkers, markerRatio);
+        const next = composePlayBuffer({ ...cur, pitch, warpMarkers: scaledMarkers }, get().projectBpm);
+        const ratio = oldLen > 0 ? next.buffer.duration / oldLen : 1;
+        const trimStart = cur.trimStart * ratio;
+        const trimEnd = cur.trimEnd * ratio;
+        m.set(trackId, { ...cur, pitch, buffer: next.buffer, trimStart, trimEnd, warpMarkers: scaledMarkers, source: null, gainNode: null });
+        set({ loadedTracks: m, bufferVersion: get().bufferVersion + 1 });
+        trackCommittedPitch.set(trackId, pitch);
+        restartIfPlaying();
+        window.dispatchEvent(new CustomEvent('ghost-save-arrangement'));
+      }, 120));
     },
 
     playSoloTrack: (trackId) => {
@@ -1596,6 +1650,9 @@ export const useAudioStore = create<AudioState>((set, get) => {
       disposeAllTrackEq();
       disposeAllTrackComp();
       disposeAllTrackReverb();
+      pitchCommitTimers.forEach((t) => clearTimeout(t));
+      pitchCommitTimers.clear();
+      trackCommittedPitch.clear();
       set({
         isPlaying: false, currentTime: 0, loadedTracks: new Map(), duration: 0,
         projectBpm: 0, soloPlayingTrackId: null, soloCurrentTime: 0, soloDuration: 0,
