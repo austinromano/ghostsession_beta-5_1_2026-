@@ -780,11 +780,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
             soloed: existing?.soloed ?? false, bpm: trackBpm || existing?.bpm || 0, pitch: existing?.pitch ?? 0,
             trimStart: existing?.trimStart ?? 0, trimEnd: existing?.trimEnd ?? 0,
             startOffset: existing?.startOffset ?? pending ?? 0,
-            // Preserve the unstretched source so future pitch / warp
-            // changes can re-stretch from a clean copy via
-            // composePlayBuffer. Without this, pitch shifts only
-            // change playbackRate and the clip plays faster / slower.
-            originalBuffer: cachedBuf,
           });
           return { loadedTracks: m };
         });
@@ -807,9 +802,6 @@ export const useAudioStore = create<AudioState>((set, get) => {
             id: trackId, buffer, source: null, gainNode: null,
             volume: 1, muted: false, soloed: false, bpm: trackBpm, pitch: 0,
             trimStart: 0, trimEnd: 0, startOffset: pending ?? 0,
-            // See cached branch above — required for pitch shifts to
-            // preserve duration.
-            originalBuffer: buffer,
           });
           return { loadedTracks: m };
         });
