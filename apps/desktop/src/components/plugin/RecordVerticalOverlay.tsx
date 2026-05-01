@@ -125,6 +125,10 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   const rafIdRef = useRef<number | null>(null);
   const recordTimerRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
+  // Picture-in-Picture window — populated when we successfully open
+  // a Document PiP for the live preview. Lives in a separate browser
+  // window so screen captures of THIS tab don't include it.
+  const pipWindowRef = useRef<Window | null>(null);
 
   // <video> elements feed the canvas compositor. The "preview" video
   // is what the user sees in the overlay before recording starts —
@@ -219,6 +223,7 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
     if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
     if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
+    closePipPreview();
   }
 
   function tapMasterAudio(): MediaStreamTrack | null {
@@ -349,6 +354,7 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
         clearInterval(recordTimerRef.current);
         recordTimerRef.current = null;
       }
+      closePipPreview();
       setPhase('reviewing');
     };
     rec.start(250);
@@ -360,6 +366,103 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       setElapsedMs(performance.now() - startTimeRef.current);
     }, 100);
     setPhase('recording');
+
+    // Open a Document Picture-in-Picture window so the user can keep
+    // monitoring the live composite WITHOUT the preview being captured
+    // by the screen-share track. PiP windows render in a separate
+    // OS window outside this tab/document, so a tab/window screen
+    // share doesn't see them. Falls back to the hide-during-recording
+    // behavior on browsers without PiP support (Firefox, Safari).
+    openPipPreview(canvasStream).catch(() => {
+      // Ignore — fall back to the in-page panel behavior.
+    });
+  }
+
+  async function openPipPreview(canvasStream: MediaStream): Promise<void> {
+    const dpip = (window as unknown as { documentPictureInPicture?: { requestWindow: (opts?: { width?: number; height?: number }) => Promise<Window> } }).documentPictureInPicture;
+    if (!dpip) return;
+    let pipWindow: Window;
+    try {
+      pipWindow = await dpip.requestWindow({ width: 360, height: 700 });
+    } catch {
+      return; // user denied / API failure — silent fall-back
+    }
+    pipWindowRef.current = pipWindow;
+    pipWindow.document.title = 'Vertical Recorder';
+
+    // Populate the PiP DOM imperatively — React lives in the parent
+    // document; mounting a portal here would entangle the lifecycle
+    // with the parent's render loop. Plain DOM keeps the PiP
+    // self-contained and predictable.
+    pipWindow.document.body.style.cssText =
+      'margin:0;background:#0a0a0f;overflow:hidden;display:flex;flex-direction:column;font-family:ui-sans-serif,system-ui,sans-serif';
+
+    const styleEl = pipWindow.document.createElement('style');
+    styleEl.textContent = `
+      @keyframes rec-blink { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
+      .rec-stop:hover { background: #dc2626 !important; }
+    `;
+    pipWindow.document.head.appendChild(styleEl);
+
+    const previewVideo = pipWindow.document.createElement('video');
+    previewVideo.autoplay = true;
+    previewVideo.muted = true;
+    previewVideo.playsInline = true;
+    previewVideo.srcObject = canvasStream;
+    previewVideo.style.cssText = 'flex:1;width:100%;min-height:0;object-fit:contain;background:#000;display:block';
+    pipWindow.document.body.appendChild(previewVideo);
+
+    const bar = pipWindow.document.createElement('div');
+    bar.style.cssText = 'flex:none;display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(15,12,32,0.96);border-top:1px solid rgba(255,255,255,0.06);color:#fff';
+    pipWindow.document.body.appendChild(bar);
+
+    const dot = pipWindow.document.createElement('span');
+    dot.style.cssText = 'width:9px;height:9px;border-radius:50%;background:#ef4444;animation:rec-blink 1s ease-in-out infinite';
+    bar.appendChild(dot);
+
+    const label = pipWindow.document.createElement('span');
+    label.style.cssText = 'font-size:11.5px;font-weight:700;letter-spacing:0.05em';
+    label.textContent = 'REC';
+    bar.appendChild(label);
+
+    const timer = pipWindow.document.createElement('span');
+    timer.style.cssText = 'font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;color:rgba(255,255,255,0.85)';
+    timer.textContent = '0:00';
+    bar.appendChild(timer);
+
+    const stopBtn = pipWindow.document.createElement('button');
+    stopBtn.textContent = 'Stop';
+    stopBtn.className = 'rec-stop';
+    stopBtn.style.cssText = 'margin-left:auto;padding:7px 16px;background:#ef4444;color:#fff;border:none;border-radius:9999px;font-weight:700;font-size:11.5px;cursor:pointer;letter-spacing:0.04em';
+    stopBtn.addEventListener('click', () => stopRecording());
+    bar.appendChild(stopBtn);
+
+    // Drive the PiP timer off the same recording-start anchor the
+    // main panel uses, so the two displays stay in lock-step.
+    const tickInterval = pipWindow.setInterval(() => {
+      const ms = performance.now() - startTimeRef.current;
+      const total = Math.floor(ms / 1000);
+      const m = Math.floor(total / 60);
+      const s = (total % 60).toString().padStart(2, '0');
+      timer.textContent = `${m}:${s}`;
+    }, 100);
+
+    pipWindow.addEventListener('pagehide', () => {
+      try { pipWindow.clearInterval(tickInterval); } catch { /* ignore */ }
+      // Don't auto-stop the recording when the PiP closes — the
+      // recorder runs off the canvas + audio nodes, not the PiP
+      // window. The user just loses the live preview; the file
+      // continues to capture cleanly until they hit Stop or the
+      // browser's Stop-sharing bar.
+      pipWindowRef.current = null;
+    });
+  }
+
+  function closePipPreview() {
+    const pip = pipWindowRef.current;
+    if (!pip) return;
+    try { pip.close(); } catch { /* ignore */ }
+    pipWindowRef.current = null;
   }
 
   function stopRecording() {
