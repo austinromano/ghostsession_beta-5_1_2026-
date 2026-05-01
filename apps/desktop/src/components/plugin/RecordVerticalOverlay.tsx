@@ -581,16 +581,11 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     </div>
   );
 
-  // While recording the OVERLAY DOM stays mounted (so React doesn't
-  // tear down our streams) but renders nothing visible, so screen
-  // capture sees the underlying app instead of our chrome.
-  const visibleHidden = phase === 'recording' || phase === 'requesting_screen';
-
   return (
     <>
       {offscreenScaffold}
       <AnimatePresence>
-        {open && !visibleHidden && (
+        {open && (
           <motion.div
             // Floating, draggable panel — no full-screen backdrop so
             // the user can keep using the project underneath. dragMomentum
@@ -686,9 +681,16 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                   )}
                 </div>
 
-                {/* Screen-share region — bottom 72%. Before record
-                    starts this is a hint; during review it's part
-                    of the playback element below. */}
+                {/* Screen-share region — bottom 72%. Renders one of:
+                    - Idle hint before record starts
+                    - "Pick a window…" while the browser picker is up
+                    - Live recording state with a REC pill + timer
+                    Importantly we DON'T render the actual screen
+                    capture inside this region — the panel itself sits
+                    on the captured surface, so showing the capture
+                    here would create an infinite mirror. The PiP
+                    window (opened from startRecording) is where the
+                    user gets a clean live composite preview. */}
                 {!resultUrl && (
                   <div
                     className="relative flex-1 flex items-center justify-center text-center px-6"
@@ -696,17 +698,47 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                       background: 'linear-gradient(180deg, rgba(20,12,44,0.6) 0%, rgba(8,6,18,0.95) 100%)',
                     }}
                   >
-                    <div>
-                      <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.65)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
-                        <rect x="2" y="3" width="20" height="14" rx="2" />
-                        <line x1="8" y1="21" x2="16" y2="21" />
-                        <line x1="12" y1="17" x2="12" y2="21" />
-                      </svg>
-                      <div className="text-[12px] text-white/80 font-semibold mb-1">App goes here</div>
-                      <div className="text-[10.5px] text-white/50 leading-snug">
-                        Hit record, then choose the Ghost Session window when your browser asks. The bar at the bottom of your browser stops the take.
+                    {phase === 'recording' ? (
+                      <div>
+                        <div className="flex items-center justify-center gap-2 mb-2">
+                          <motion.span
+                            className="w-2.5 h-2.5 rounded-full bg-red-500"
+                            animate={{ opacity: [1, 0.35, 1] }}
+                            transition={{ duration: 1, repeat: Infinity, ease: 'easeInOut' }}
+                          />
+                          <span className="text-[16px] font-bold text-white tabular-nums">
+                            REC {formatTime(elapsedMs)}
+                          </span>
+                        </div>
+                        <div className="text-[10.5px] text-white/55 leading-snug max-w-[240px] mx-auto">
+                          A separate Picture-in-Picture window is showing the live composite. Stop from there or from your browser's Stop sharing bar.
+                        </div>
                       </div>
-                    </div>
+                    ) : phase === 'requesting_screen' ? (
+                      <div>
+                        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.85)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
+                          <rect x="2" y="3" width="20" height="14" rx="2" />
+                          <line x1="8" y1="21" x2="16" y2="21" />
+                          <line x1="12" y1="17" x2="12" y2="21" />
+                        </svg>
+                        <div className="text-[12px] text-white/85 font-semibold mb-1">Pick the window to share</div>
+                        <div className="text-[10.5px] text-white/55 leading-snug">
+                          Choose the Ghost Session window in your browser's screen-share dialog.
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.65)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
+                          <rect x="2" y="3" width="20" height="14" rx="2" />
+                          <line x1="8" y1="21" x2="16" y2="21" />
+                          <line x1="12" y1="17" x2="12" y2="21" />
+                        </svg>
+                        <div className="text-[12px] text-white/80 font-semibold mb-1">App goes here</div>
+                        <div className="text-[10.5px] text-white/50 leading-snug">
+                          Hit record, then choose the Ghost Session window when your browser asks. The bar at the bottom of your browser stops the take.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )}
 
@@ -747,6 +779,20 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                       title="Start recording"
                     >
                       <span className="block w-12 h-12 rounded-full" style={{ background: '#ef4444' }} />
+                    </button>
+                  )}
+                  {phase === 'recording' && (
+                    <button
+                      type="button"
+                      onClick={stopRecording}
+                      className="w-16 h-16 rounded-full flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
+                      style={{
+                        background: 'rgba(255,255,255,0.95)',
+                        boxShadow: '0 6px 18px rgba(0,0,0,0.45), 0 0 0 4px rgba(239,68,68,0.35)',
+                      }}
+                      title="Stop"
+                    >
+                      <span className="block w-7 h-7 rounded-md" style={{ background: '#ef4444' }} />
                     </button>
                   )}
                   {resultUrl && phase === 'reviewing' && (
@@ -806,23 +852,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
         )}
       </AnimatePresence>
 
-      {/* Recording HUD — shown OUTSIDE the modal scaffold so it
-          floats over the live app while recording. Tiny so the
-          screen capture barely notices it; the user clicks the
-          browser's own "Stop sharing" bar to end the take. */}
-      {open && phase === 'recording' && (
-        <div
-          className="fixed top-3 right-3 z-[100] flex items-center gap-1.5 px-2.5 py-1 rounded-full pointer-events-none"
-          style={{ background: 'rgba(239,68,68,0.92)', boxShadow: '0 4px 12px rgba(0,0,0,0.4)' }}
-        >
-          <motion.span
-            className="w-1.5 h-1.5 rounded-full bg-white"
-            animate={{ opacity: [1, 0.35, 1] }}
-            transition={{ duration: 1, repeat: Infinity, ease: 'easeInOut' }}
-          />
-          <span className="text-[10px] font-bold text-white tabular-nums">REC {formatTime(elapsedMs)}</span>
-        </div>
-      )}
     </>
   );
 }
