@@ -306,10 +306,23 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
     // Track which (clipId, absoluteStepIdx) pairs we've already queued so
     // we never double-fire across overlapping scheduler ticks.
     const queued = new Set<string>();
+    // Last seen project time — used to detect a backward jump (loop or
+    // user seek). When projectNow regresses we wipe `queued` so steps
+    // can fire again on the second pass; otherwise the stale keys from
+    // the first loop iteration would block every hit on the second.
+    let lastProjectNow = -1;
+    let wasPlaying = false;
 
     const tick = () => {
       const audio = useAudioStore.getState();
-      if (!audio.isPlaying) return;
+      if (!audio.isPlaying) {
+        // Reset the dedupe set so the NEXT play-from-start (or any new
+        // playback range) gets a clean slate. Otherwise rewind+play
+        // suffers the same stale-key problem as a loop.
+        if (wasPlaying) { queued.clear(); lastProjectNow = -1; wasPlaying = false; }
+        return;
+      }
+      wasPlaying = true;
       const projectBpm = audio.projectBpm > 0 ? audio.projectBpm : 120;
       const stepDur = 60 / projectBpm / 4; // 16th note
       const lookahead = 0.12;
@@ -323,6 +336,14 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       const startedAt = getStartedAt();
       const projectNow = ctxNow - startedAt;
       const horizonProjectTime = projectNow + lookahead;
+
+      // Backward jump detection — > 50 ms regression flags a loop /
+      // seek / rewind. Wipe the dedupe set so previously-queued steps
+      // are eligible to fire again at their new (looped) project times.
+      if (lastProjectNow >= 0 && projectNow < lastProjectNow - 0.05) {
+        queued.clear();
+      }
+      lastProjectNow = projectNow;
 
       for (const clip of get().clips) {
         const clipEnd = clip.startSec + clip.lengthSec;
