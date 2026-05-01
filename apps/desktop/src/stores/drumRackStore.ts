@@ -39,6 +39,10 @@ export interface DrumClip {
   // user can drag a cell to dial in any value in (0, 1]. New rows added
   // later get auto-padded with zeros.
   steps: number[][];
+  // When true, each cell is a 16th-note TRIPLET (60/bpm/6) instead of
+  // a straight 16th (60/bpm/4). Lets the user feel-flip a pattern
+  // between straight and triplet without rebuilding the grid.
+  triplet?: boolean;
 }
 
 interface DrumRackState {
@@ -78,6 +82,9 @@ interface DrumRackState {
   // Set the velocity of a single step. velocity in [0, 1]; 0 turns the
   // step off. Used by the click-and-drag interaction in the step grid.
   setStepVelocity: (clipId: string, rowIdx: number, stepIdx: number, velocity: number) => void;
+  // Toggle whether the clip plays as 16th triplets (true) or straight
+  // 16ths (false). Re-clamps lengthSec so a full pattern cycle fits.
+  setClipTriplet: (clipId: string, triplet: boolean) => void;
   clearClip: (clipId: string) => void;
 
   // Scheduler
@@ -153,6 +160,16 @@ function makeRow(): DrumRow {
 
 function emptySteps(rowCount: number, patternSteps: number): number[][] {
   return Array.from({ length: rowCount }, () => new Array(patternSteps).fill(0));
+}
+
+// Step duration for a clip — straight 16th = quarter / 4, triplet 16th
+// = quarter / 6 (three notes in the space of two). Single source of
+// truth so the scheduler, currentStepIdx readouts, and lengthSec math
+// can't drift apart when triplet mode is toggled.
+export function stepDurForClip(clip: { triplet?: boolean }, projectBpm: number): number {
+  const bpm = projectBpm > 0 ? projectBpm : 120;
+  const sub = clip.triplet ? 6 : 4;
+  return 60 / bpm / sub;
 }
 
 // Migration helper — old projects stored steps as boolean[][]; new
@@ -264,8 +281,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       // Matches FL Studio: pattern block defaults to pattern length.
       // Shrinking the pattern (32 → 16) leaves the clip alone — user
       // may have a longer clip that loops the pattern.
-      const bpm = useAudioStore.getState().projectBpm || 120;
-      const stepDur = 60 / bpm / 4;
+      const stepDur = stepDurForClip(c, useAudioStore.getState().projectBpm);
       const fullCycle = n * stepDur;
       const lengthSec = Math.max(c.lengthSec, fullCycle);
       return { ...c, patternSteps: n, steps, lengthSec };
@@ -293,6 +309,20 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
       steps[rowIdx][stepIdx] = Math.max(0, Math.min(1, velocity));
       return { ...c, steps };
+    }),
+  })),
+
+  setClipTriplet: (clipId, triplet) => set((s) => ({
+    clips: s.clips.map((c) => {
+      if (c.id !== clipId) return c;
+      const next = { ...c, triplet };
+      // Re-extend the clip if the new feel makes one full pattern
+      // cycle longer than the current lengthSec — otherwise the tail
+      // of the pattern would silently never play.
+      const stepDur = stepDurForClip(next, useAudioStore.getState().projectBpm);
+      const fullCycle = c.patternSteps * stepDur;
+      next.lengthSec = Math.max(c.lengthSec, fullCycle);
+      return next;
     }),
   })),
 
@@ -324,7 +354,10 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       }
       wasPlaying = true;
       const projectBpm = audio.projectBpm > 0 ? audio.projectBpm : 120;
-      const stepDur = 60 / projectBpm / 4; // 16th note
+      // Step duration is now per-clip (triplet vs straight). Computed
+      // inside the loop below; this baseline is only used to size the
+      // lookahead window.
+      const baselineStepDur = 60 / projectBpm / 4;
       const lookahead = 0.12;
 
       // Use the sample-accurate ctx → project anchor instead of the
@@ -350,6 +383,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         if (clipEnd <= projectNow) continue;
         if (clip.startSec >= horizonProjectTime) continue;
         // Walk the clip's step indices that intersect the lookahead window.
+        const stepDur = stepDurForClip(clip, projectBpm);
         const clipDur = clip.lengthSec;
         const stepsPerClip = Math.floor(clipDur / stepDur);
         if (stepsPerClip <= 0) continue;
@@ -410,7 +444,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         const cutoff = projectNow - 5;
         queued.forEach((k) => {
           const [, stepStr] = k.split(':');
-          const t = parseInt(stepStr, 10) * stepDur;
+          const t = parseInt(stepStr, 10) * baselineStepDur;
           if (t < cutoff) queued.delete(k);
         });
       }

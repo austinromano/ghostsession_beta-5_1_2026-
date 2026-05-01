@@ -30,6 +30,7 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
   const toggleRowMuted = useDrumRack((s) => s.toggleRowMuted);
   const toggleStep = useDrumRack((s) => s.toggleStep);
   const setStepVelocity = useDrumRack((s) => s.setStepVelocity);
+  const setClipTriplet = useDrumRack((s) => s.setClipTriplet);
   const clearClip = useDrumRack((s) => s.clearClip);
   const setPatternSteps = useDrumRack((s) => s.setPatternSteps);
   const createClipAt = useDrumRack((s) => s.createClipAt);
@@ -72,7 +73,8 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
     const t = s.currentTime;
     if (t < selectedClip.startSec || t >= selectedClip.startSec + selectedClip.lengthSec) return -1;
     const projectBpmNow = s.projectBpm > 0 ? s.projectBpm : 120;
-    const stepDur = 60 / projectBpmNow / 4;
+    const sub = selectedClip.triplet ? 6 : 4;
+    const stepDur = 60 / projectBpmNow / sub;
     const absStep = Math.floor((t - selectedClip.startSec) / Math.max(stepDur, 1e-6));
     return absStep % selectedClip.patternSteps;
   });
@@ -190,6 +192,14 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
             + Clip
           </button>
           <button
+            onClick={() => selectedClip && setClipTriplet(selectedClip.id, !selectedClip.triplet)}
+            disabled={!selectedClip}
+            className={`px-2 py-0.5 rounded ${selectedClip?.triplet ? 'bg-ghost-green/20 text-ghost-green' : 'text-white/40 hover:bg-white/[0.06] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-white/40'}`}
+            title={selectedClip?.triplet ? 'Switch to straight 16ths' : 'Switch to 16th triplets'}
+          >
+            3T
+          </button>
+          <button
             onClick={handleDuplicate}
             disabled={!selectedClip}
             className="px-2 py-0.5 rounded bg-ghost-green/10 text-ghost-green hover:bg-ghost-green/20 disabled:opacity-30 disabled:hover:bg-ghost-green/10"
@@ -248,6 +258,7 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
             steps={selectedClip?.steps[rowIdx] ?? null}
             clipSelected={!!selectedClip}
             currentStepIdx={currentStepIdx}
+            triplet={!!selectedClip?.triplet}
             onDrop={(source) => loadIntoRow(row.id, source)}
             onToggleStep={(idx) => selectedClip && toggleStep(selectedClip.id, rowIdx, idx)}
             onSetStepVelocity={(idx, v) => selectedClip && setStepVelocity(selectedClip.id, rowIdx, idx, v)}
@@ -268,13 +279,14 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
 
 // ── Single row ───────────────────────────────────────────────────────────
 
-function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, onDrop, onToggleStep, onSetStepVelocity, onSetVolume, onToggleMuted, onRemove }: {
+function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, triplet, onDrop, onToggleStep, onSetStepVelocity, onSetVolume, onToggleMuted, onRemove }: {
   row: DrumRow;
   rowIdx: number;
   patternSteps: number;
   steps: number[] | null;
   clipSelected: boolean;
   currentStepIdx: number;
+  triplet: boolean;
   onDrop: (source: { kind: 'os'; file: File } | { kind: 'library'; id: string; name: string } | { kind: 'projectFile'; id: string; name: string }) => void;
   onToggleStep: (idx: number) => void;
   onSetStepVelocity: (idx: number, velocity: number) => void;
@@ -371,7 +383,11 @@ function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, o
         {Array.from({ length: patternSteps }).map((_, i) => (
           <StepCell
             key={i}
-            beatStart={i % 4 === 0}
+            // In triplet mode every 3 cells = an 8th-note triplet
+            // group; in straight mode every 4 cells = a beat. Group
+            // start gets the slightly brighter base background so the
+            // user can read the rhythmic structure at a glance.
+            beatStart={triplet ? i % 3 === 0 : i % 4 === 0}
             playing={i === currentStepIdx}
             velocity={steps?.[i] ?? 0}
             disabled={!clipSelected}
