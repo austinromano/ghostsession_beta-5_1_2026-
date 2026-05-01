@@ -108,36 +108,68 @@ function drawStretch(
   } catch { /* video may not be ready yet */ }
 }
 
-// Draw the cartoon Ghost Session mascot (a Pac-Man-style ghost, mint
-// green) centered at (cx, cy) with given outer width. Pure paths so
-// it's resolution-independent and no image load is needed.
-function drawGhostMascot(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number): void {
-  const h = w * 1.05;
-  const x = cx - w / 2;
-  const y = cy - h / 2;
-  const radius = w / 2;
-  const bumpHeight = w * 0.10;
+// Draw the official Ghost Session mark — a 1:1 canvas port of the
+// SVG path used in WelcomeHero (the ghost on the home screen). The
+// stroke + eye fills use the brand gradient `#00FFC8 → #7C3AED`.
+// Source viewBox is 20×22; we scale that into a (cx, cy)-centered
+// box `size` wide.
+function drawBrandGhost(ctx: CanvasRenderingContext2D, cx: number, cy: number, size: number): void {
+  const VB_W = 20;
+  const VB_H = 22;
+  const scale = size / VB_W;
+  const renderH = VB_H * scale;
+  const x0 = cx - size / 2;
+  const y0 = cy - renderH / 2;
+
+  // Map a viewBox coordinate (in 0..20, 0..22 space) to canvas px.
+  const cvx = (vx: number) => x0 + vx * scale;
+  const cvy = (vy: number) => y0 + vy * scale;
+
   ctx.save();
-  // Body — dome on top, three rounded bumps on the bottom.
-  ctx.fillStyle = '#23E5A8';
+  // Body path — same M10 1 C…V9 C…z command sequence as the SVG.
   ctx.beginPath();
-  ctx.arc(cx, y + radius, radius, Math.PI, 0, false);     // top semicircle
-  ctx.lineTo(x + w, y + h - bumpHeight);                  // right side down
-  // 3 wavy bumps along the bottom (right → left).
-  ctx.quadraticCurveTo(x + w * 0.83, y + h, x + w * 0.66, y + h - bumpHeight);
-  ctx.quadraticCurveTo(x + w * 0.50, y + h, x + w * 0.33, y + h - bumpHeight);
-  ctx.quadraticCurveTo(x + w * 0.16, y + h, x,            y + h - bumpHeight);
+  ctx.moveTo(cvx(10), cvy(1));
+  ctx.bezierCurveTo(cvx(5.5), cvy(1), cvx(2), cvy(4.5), cvx(2), cvy(9));
+  ctx.lineTo(cvx(2), cvy(17));
+  ctx.lineTo(cvx(4), cvy(15));
+  ctx.lineTo(cvx(6), cvy(17));
+  ctx.lineTo(cvx(8), cvy(15));
+  ctx.lineTo(cvx(10), cvy(17));
+  ctx.lineTo(cvx(12), cvy(15));
+  ctx.lineTo(cvx(14), cvy(17));
+  ctx.lineTo(cvx(16), cvy(15));
+  ctx.lineTo(cvx(18), cvy(17));
+  ctx.lineTo(cvx(18), cvy(9));
+  ctx.bezierCurveTo(cvx(18), cvy(4.5), cvx(14.5), cvy(1), cvx(10), cvy(1));
   ctx.closePath();
+  // Soft mint fill (rgba(0,255,200,0.08) in the SVG) — keeps the
+  // ghost's interior just barely tinted.
+  ctx.fillStyle = 'rgba(0,255,200,0.10)';
   ctx.fill();
-  // Eyes — black ovals, slightly offset so the ghost reads as
-  // glancing forward rather than dead-on staring.
-  const eyeRx = w * 0.085;
-  const eyeRy = w * 0.115;
-  const eyeY = y + h * 0.46;
-  ctx.fillStyle = '#0a0a0f';
+  // Brand gradient stroke — diagonal across the path.
+  const gradient = ctx.createLinearGradient(x0, y0, x0 + size, y0 + renderH);
+  gradient.addColorStop(0, '#00FFC8');
+  gradient.addColorStop(1, '#7C3AED');
+  ctx.strokeStyle = gradient;
+  ctx.lineWidth = Math.max(1.2, scale * 1.4);
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+
+  // Eyes — gradient-filled ovals with darker pupils, exactly the
+  // proportions used in the SVG (rx 1.6, ry 1.8 / pupil rx 0.6, ry 0.7).
+  const eyeRx = 1.6 * scale;
+  const eyeRy = 1.8 * scale;
+  const pupilRx = 0.6 * scale;
+  const pupilRy = 0.7 * scale;
+  ctx.fillStyle = gradient;
   ctx.beginPath();
-  ctx.ellipse(cx - w * 0.20, eyeY, eyeRx, eyeRy, 0, 0, Math.PI * 2);
-  ctx.ellipse(cx + w * 0.20, eyeY, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+  ctx.ellipse(cvx(7.5), cvy(9.5), eyeRx, eyeRy, 0, 0, Math.PI * 2);
+  ctx.ellipse(cvx(12.5), cvy(9.5), eyeRx, eyeRy, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#0A0412';
+  ctx.beginPath();
+  ctx.ellipse(cvx(7.5), cvy(9.2), pupilRx, pupilRy, 0, 0, Math.PI * 2);
+  ctx.ellipse(cvx(12.5), cvy(9.2), pupilRx, pupilRy, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
 }
@@ -196,14 +228,31 @@ function drawWatermark(ctx: CanvasRenderingContext2D): void {
   ctx.strokeStyle = 'rgba(255,255,255,0.06)';
   ctx.stroke();
 
-  // Ghost mascot — left side of the pill.
-  drawGhostMascot(ctx, pillX + padX + iconSize / 2, pillY + pillH / 2, iconSize);
+  // Brand ghost mark on the left side of the pill — same path +
+  // gradient the home page uses.
+  drawBrandGhost(ctx, pillX + padX + iconSize / 2, pillY + pillH / 2, iconSize);
 
-  // Wordmark — right side, vertically centered against the icon.
-  ctx.fillStyle = '#ffffff';
+  // Wordmark — right side, gradient-filled to mirror the home-page
+  // hero where {firstName} sits in `linear-gradient(120deg, #00FFC8
+  // 0%, #7C3AED 55%, #EC4899 100%)`. canvas createLinearGradient
+  // takes start + end points, so we map CSS 120° to the equivalent
+  // diagonal across the wordmark's bounding box.
+  const textX = pillX + padX + iconSize + gap;
+  const textY = pillY + pillH / 2 + 1;
+  // Approximate 120deg: gradient runs from upper-left to lower-right
+  // across the text. Slight downward angle so it reads diagonal.
+  const gradStartX = textX;
+  const gradStartY = pillY + padY * 0.4;
+  const gradEndX = textX + textWidth;
+  const gradEndY = pillY + pillH - padY * 0.4;
+  const wordGrad = ctx.createLinearGradient(gradStartX, gradStartY, gradEndX, gradEndY);
+  wordGrad.addColorStop(0, '#00FFC8');
+  wordGrad.addColorStop(0.55, '#7C3AED');
+  wordGrad.addColorStop(1, '#EC4899');
+  ctx.fillStyle = wordGrad;
   ctx.textBaseline = 'middle';
   ctx.textAlign = 'left';
-  ctx.fillText(text, pillX + padX + iconSize + gap, pillY + pillH / 2 + 1);
+  ctx.fillText(text, textX, textY);
   ctx.restore();
 }
 
