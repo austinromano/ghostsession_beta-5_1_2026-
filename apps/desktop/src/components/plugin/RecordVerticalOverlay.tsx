@@ -57,7 +57,8 @@ const SCREEN_TOP = CAMERA_HEIGHT;
 const SCREEN_HEIGHT = OUTPUT_H - CAMERA_HEIGHT;
 
 // Frame-fit math: scale + crop so the source fills the destination
-// rect like CSS object-fit: cover.
+// rect like CSS object-fit: cover. Used for the camera region — we
+// preserve the user's face cam aspect and crop excess.
 function drawCover(
   ctx: CanvasRenderingContext2D,
   src: HTMLVideoElement,
@@ -83,6 +84,27 @@ function drawCover(
   }
   try {
     ctx.drawImage(src, cropX, cropY, cropW, cropH, dx, dy, dw, dh);
+  } catch { /* video may not be ready yet */ }
+}
+
+// Stretch-fit: scale the entire source to exactly fill dest. Used for
+// the screen-share region so the bottom 72% is ALWAYS filled edge-to-
+// edge, regardless of whether the captured window's content actually
+// reaches its edges. Cover-fit was leaving black space whenever the
+// user's shared window had empty area below the app (browser chrome,
+// taskbar, etc) — drawCover would dutifully scale that empty area
+// into the dest. Stretch-fit accepts a small aspect distortion in
+// exchange for never showing dead space.
+function drawStretch(
+  ctx: CanvasRenderingContext2D,
+  src: HTMLVideoElement,
+  dx: number, dy: number, dw: number, dh: number,
+): void {
+  const sw = src.videoWidth;
+  const sh = src.videoHeight;
+  if (!sw || !sh) return;
+  try {
+    ctx.drawImage(src, 0, 0, sw, sh, dx, dy, dw, dh);
   } catch { /* video may not be ready yet */ }
 }
 
@@ -137,6 +159,12 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   // preview panel and the MediaRecorder feed. Stored in a ref so
   // beginRecording() can find it after chooseWindow() finished.
   const canvasStreamRef = useRef<MediaStream | null>(null);
+  // Pre-loaded brand watermark — burned into every frame at the
+  // bottom-right of the canvas so every saved file ships with the
+  // Ghost Session mark baked in (not a separate overlay). Loaded
+  // once on mount and held as a regular Image (not a ref-via-state)
+  // so the compositor RAF doesn't re-render-trigger.
+  const watermarkRef = useRef<HTMLImageElement | null>(null);
 
   // <video> elements feed the canvas compositor. The "preview" video
   // is what the user sees in the overlay before recording starts —
@@ -145,6 +173,18 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Pre-load the watermark once. Doesn't depend on `open` — keep it
+  // hot in case the user repeats record sessions, and the image is
+  // tiny so the cost is negligible.
+  useEffect(() => {
+    if (watermarkRef.current) return;
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = '/ghost-watermark.png';
+    img.onload = () => { watermarkRef.current = img; };
+    img.onerror = () => { /* watermark missing — recording still works without it */ };
+  }, []);
 
   // Acquire camera on open. Mic stays off intentionally.
   useEffect(() => {
@@ -318,7 +358,29 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
         drawCover(ctx2d, camV, 0, 0, OUTPUT_W, CAMERA_HEIGHT);
       }
       if (scrV && scrV.videoWidth > 0) {
-        drawCover(ctx2d, scrV, 0, SCREEN_TOP, OUTPUT_W, SCREEN_HEIGHT);
+        // Stretch the captured window to fully fill the bottom region
+        // edge-to-edge — see drawStretch comment for rationale. Slight
+        // aspect distortion is acceptable; black space is not.
+        drawStretch(ctx2d, scrV, 0, SCREEN_TOP, OUTPUT_W, SCREEN_HEIGHT);
+      }
+      // Watermark — burned into every frame so the saved file always
+      // carries the Ghost Session mark. Sits in the bottom-right
+      // corner with a soft shadow so it reads against any background.
+      // Sized at 12% of canvas width with a 4% margin off the edges.
+      const wm = watermarkRef.current;
+      if (wm && wm.complete && wm.naturalWidth > 0) {
+        const wmSize = Math.round(OUTPUT_W * 0.12);
+        const margin = Math.round(OUTPUT_W * 0.035);
+        const x = OUTPUT_W - wmSize - margin;
+        const y = OUTPUT_H - wmSize - margin;
+        ctx2d.save();
+        ctx2d.shadowColor = 'rgba(0,0,0,0.55)';
+        ctx2d.shadowBlur = 18;
+        ctx2d.shadowOffsetX = 0;
+        ctx2d.shadowOffsetY = 4;
+        ctx2d.globalAlpha = 0.92;
+        ctx2d.drawImage(wm, x, y, wmSize, wmSize);
+        ctx2d.restore();
       }
       rafIdRef.current = requestAnimationFrame(drawFrame);
     };
