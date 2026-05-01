@@ -361,10 +361,12 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
         drawCover(ctx2d, camV, 0, 0, OUTPUT_W, CAMERA_HEIGHT);
       }
       if (scrV && scrV.videoWidth > 0) {
-        // Stretch the captured window to fully fill the bottom region
-        // edge-to-edge — see drawStretch comment for rationale. Slight
-        // aspect distortion is acceptable; black space is not.
-        drawStretch(ctx2d, scrV, 0, SCREEN_TOP, OUTPUT_W, SCREEN_HEIGHT);
+        // Cover-fit preserves the captured window's aspect — content
+        // crops in from the sides if the window is wider than the
+        // 9:16 region, but never gets squished. Stretch-fit was
+        // tried and rejected: filling the region edge-to-edge isn't
+        // worth distorting the app UI.
+        drawCover(ctx2d, scrV, 0, SCREEN_TOP, OUTPUT_W, SCREEN_HEIGHT);
       }
       // Watermark — burned into every frame so the saved file always
       // carries the Ghost Session mark. Sits in the bottom-right
