@@ -34,10 +34,17 @@ interface Props {
   onClose: () => void;
 }
 
+// Recorder lifecycle:
+//   requesting_camera → previewing → requesting_screen
+//   → ready_to_record → recording → finalizing → reviewing
+// Screen capture is acquired BEFORE the user presses record so they
+// can confirm the composite (camera + screen) reads correctly. The
+// big record button only appears once both streams are live.
 type Phase =
   | 'requesting_camera'
   | 'previewing'
   | 'requesting_screen'
+  | 'ready_to_record'
   | 'recording'
   | 'finalizing'
   | 'reviewing'
@@ -125,10 +132,11 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   const rafIdRef = useRef<number | null>(null);
   const recordTimerRef = useRef<number | null>(null);
   const startTimeRef = useRef<number>(0);
-  // Picture-in-Picture window — populated when we successfully open
-  // a Document PiP for the live preview. Lives in a separate browser
-  // window so screen captures of THIS tab don't include it.
-  const pipWindowRef = useRef<Window | null>(null);
+  // Canvas captureStream — created once when the compositor starts
+  // (after both camera + screen are live) and reused for both the
+  // preview panel and the MediaRecorder feed. Stored in a ref so
+  // beginRecording() can find it after chooseWindow() finished.
+  const canvasStreamRef = useRef<MediaStream | null>(null);
 
   // <video> elements feed the canvas compositor. The "preview" video
   // is what the user sees in the overlay before recording starts —
@@ -223,7 +231,7 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     if (cameraVideoRef.current) cameraVideoRef.current.srcObject = null;
     if (screenVideoRef.current) screenVideoRef.current.srcObject = null;
     if (previewVideoRef.current) previewVideoRef.current.srcObject = null;
-    closePipPreview();
+    canvasStreamRef.current = null;
   }
 
   function tapMasterAudio(): MediaStreamTrack | null {
@@ -235,18 +243,18 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     return tracks[0] || null;
   }
 
-  async function startRecording() {
+  // Step 1 — get the screen-share stream + start the canvas
+  // compositor. Doesn't touch MediaRecorder yet; the user reviews
+  // the composite preview first and triggers the take with the big
+  // record button (beginRecording).
+  async function chooseWindow() {
     const cam = cameraStreamRef.current;
     if (!cam) return;
     setPhase('requesting_screen');
     setError(null);
-    chunksRef.current = [];
 
     let screenStream: MediaStream;
     try {
-      // preferCurrentTab is a Chromium hint — the picker pre-selects
-      // the current tab so the user can confirm with one click. Other
-      // browsers ignore it and still show the regular picker.
       screenStream = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: { ideal: 30 } },
         audio: false,
@@ -268,19 +276,25 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       try { await screenVideoRef.current.play(); } catch { /* ignore */ }
     }
 
-    // The browser owns the "stop sharing" UI — when the user clicks
-    // it, the screen track ends and we finalise the recording. This
-    // is the primary stop affordance during a take.
+    // If the user hits Stop sharing in the browser at any point,
+    // tear the compositor down + drop back to camera-only preview.
     const screenTrack = screenStream.getVideoTracks()[0];
     if (screenTrack) {
       screenTrack.addEventListener('ended', () => {
         if (recorderRef.current && recorderRef.current.state === 'recording') {
           stopRecording();
+        } else {
+          // User cancelled the share before recording started.
+          stopCompositor();
+          screenStreamRef.current = null;
+          setPhase('previewing');
         }
       });
     }
 
-    // Build the composite canvas + RAF compositor.
+    // Wire the canvas + RAF compositor — this populates the live
+    // canvas captureStream that both the panel preview and the
+    // recorder consume.
     const canvas = canvasRef.current;
     if (!canvas) {
       setError('Canvas missing');
@@ -296,8 +310,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       return;
     }
     const drawFrame = () => {
-      // Black backdrop so any source frame that hasn't loaded yet
-      // doesn't leave previous-frame artefacts.
       ctx2d.fillStyle = '#000';
       ctx2d.fillRect(0, 0, OUTPUT_W, OUTPUT_H);
       const camV = cameraVideoRef.current;
@@ -312,7 +324,25 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     };
     rafIdRef.current = requestAnimationFrame(drawFrame);
 
-    const canvasStream = canvas.captureStream(30);
+    canvasStreamRef.current = canvas.captureStream(30);
+    setPhase('ready_to_record');
+  }
+
+  function stopCompositor() {
+    if (rafIdRef.current != null) {
+      cancelAnimationFrame(rafIdRef.current);
+      rafIdRef.current = null;
+    }
+    canvasStreamRef.current = null;
+  }
+
+  // Step 2 — actually start the recording. Compositor must already
+  // be running (chooseWindow has set phase = ready_to_record).
+  function beginRecording() {
+    const canvasStream = canvasStreamRef.current;
+    if (!canvasStream) return;
+    chunksRef.current = [];
+
     const audioTrack = tapMasterAudio();
     const tracks: MediaStreamTrack[] = [...canvasStream.getVideoTracks()];
     if (audioTrack) tracks.push(audioTrack);
@@ -338,10 +368,7 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       setResultUrl(url);
       setResultMime(rec.mimeType || 'video/webm');
       // Tear down compositor + tracks now that the take is final.
-      if (rafIdRef.current != null) {
-        cancelAnimationFrame(rafIdRef.current);
-        rafIdRef.current = null;
-      }
+      stopCompositor();
       if (screenStreamRef.current) {
         for (const t of screenStreamRef.current.getTracks()) try { t.stop(); } catch { /* ignore */ }
         screenStreamRef.current = null;
@@ -354,7 +381,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
         clearInterval(recordTimerRef.current);
         recordTimerRef.current = null;
       }
-      closePipPreview();
       setPhase('reviewing');
     };
     rec.start(250);
@@ -366,103 +392,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       setElapsedMs(performance.now() - startTimeRef.current);
     }, 100);
     setPhase('recording');
-
-    // Open a Document Picture-in-Picture window so the user can keep
-    // monitoring the live composite WITHOUT the preview being captured
-    // by the screen-share track. PiP windows render in a separate
-    // OS window outside this tab/document, so a tab/window screen
-    // share doesn't see them. Falls back to the hide-during-recording
-    // behavior on browsers without PiP support (Firefox, Safari).
-    openPipPreview(canvasStream).catch(() => {
-      // Ignore — fall back to the in-page panel behavior.
-    });
-  }
-
-  async function openPipPreview(canvasStream: MediaStream): Promise<void> {
-    const dpip = (window as unknown as { documentPictureInPicture?: { requestWindow: (opts?: { width?: number; height?: number }) => Promise<Window> } }).documentPictureInPicture;
-    if (!dpip) return;
-    let pipWindow: Window;
-    try {
-      pipWindow = await dpip.requestWindow({ width: 360, height: 700 });
-    } catch {
-      return; // user denied / API failure — silent fall-back
-    }
-    pipWindowRef.current = pipWindow;
-    pipWindow.document.title = 'Vertical Recorder';
-
-    // Populate the PiP DOM imperatively — React lives in the parent
-    // document; mounting a portal here would entangle the lifecycle
-    // with the parent's render loop. Plain DOM keeps the PiP
-    // self-contained and predictable.
-    pipWindow.document.body.style.cssText =
-      'margin:0;background:#0a0a0f;overflow:hidden;display:flex;flex-direction:column;font-family:ui-sans-serif,system-ui,sans-serif';
-
-    const styleEl = pipWindow.document.createElement('style');
-    styleEl.textContent = `
-      @keyframes rec-blink { 0%,100% { opacity: 1 } 50% { opacity: 0.35 } }
-      .rec-stop:hover { background: #dc2626 !important; }
-    `;
-    pipWindow.document.head.appendChild(styleEl);
-
-    const previewVideo = pipWindow.document.createElement('video');
-    previewVideo.autoplay = true;
-    previewVideo.muted = true;
-    previewVideo.playsInline = true;
-    previewVideo.srcObject = canvasStream;
-    previewVideo.style.cssText = 'flex:1;width:100%;min-height:0;object-fit:contain;background:#000;display:block';
-    pipWindow.document.body.appendChild(previewVideo);
-
-    const bar = pipWindow.document.createElement('div');
-    bar.style.cssText = 'flex:none;display:flex;align-items:center;gap:10px;padding:12px 14px;background:rgba(15,12,32,0.96);border-top:1px solid rgba(255,255,255,0.06);color:#fff';
-    pipWindow.document.body.appendChild(bar);
-
-    const dot = pipWindow.document.createElement('span');
-    dot.style.cssText = 'width:9px;height:9px;border-radius:50%;background:#ef4444;animation:rec-blink 1s ease-in-out infinite';
-    bar.appendChild(dot);
-
-    const label = pipWindow.document.createElement('span');
-    label.style.cssText = 'font-size:11.5px;font-weight:700;letter-spacing:0.05em';
-    label.textContent = 'REC';
-    bar.appendChild(label);
-
-    const timer = pipWindow.document.createElement('span');
-    timer.style.cssText = 'font-size:11.5px;font-weight:600;font-variant-numeric:tabular-nums;color:rgba(255,255,255,0.85)';
-    timer.textContent = '0:00';
-    bar.appendChild(timer);
-
-    const stopBtn = pipWindow.document.createElement('button');
-    stopBtn.textContent = 'Stop';
-    stopBtn.className = 'rec-stop';
-    stopBtn.style.cssText = 'margin-left:auto;padding:7px 16px;background:#ef4444;color:#fff;border:none;border-radius:9999px;font-weight:700;font-size:11.5px;cursor:pointer;letter-spacing:0.04em';
-    stopBtn.addEventListener('click', () => stopRecording());
-    bar.appendChild(stopBtn);
-
-    // Drive the PiP timer off the same recording-start anchor the
-    // main panel uses, so the two displays stay in lock-step.
-    const tickInterval = pipWindow.setInterval(() => {
-      const ms = performance.now() - startTimeRef.current;
-      const total = Math.floor(ms / 1000);
-      const m = Math.floor(total / 60);
-      const s = (total % 60).toString().padStart(2, '0');
-      timer.textContent = `${m}:${s}`;
-    }, 100);
-
-    pipWindow.addEventListener('pagehide', () => {
-      try { pipWindow.clearInterval(tickInterval); } catch { /* ignore */ }
-      // Don't auto-stop the recording when the PiP closes — the
-      // recorder runs off the canvas + audio nodes, not the PiP
-      // window. The user just loses the live preview; the file
-      // continues to capture cleanly until they hit Stop or the
-      // browser's Stop-sharing bar.
-      pipWindowRef.current = null;
-    });
-  }
-
-  function closePipPreview() {
-    const pip = pipWindowRef.current;
-    if (!pip) return;
-    try { pip.close(); } catch { /* ignore */ }
-    pipWindowRef.current = null;
   }
 
   function stopRecording() {
@@ -681,61 +610,79 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                   )}
                 </div>
 
-                {/* Screen-share region — bottom 72%. Renders one of:
-                    - Idle hint before record starts
-                    - "Pick a window…" while the browser picker is up
-                    - Live recording state with a REC pill + timer
-                    Importantly we DON'T render the actual screen
-                    capture inside this region — the panel itself sits
-                    on the captured surface, so showing the capture
-                    here would create an infinite mirror. The PiP
-                    window (opened from startRecording) is where the
-                    user gets a clean live composite preview. */}
+                {/* Screen-share region — bottom 72%. Once chooseWindow
+                    has succeeded, the live screen-capture <video>
+                    fills this region so the user sees both their
+                    camera (top) and the shared window (bottom)
+                    inside one panel. Note: when the panel is over
+                    the captured surface, this preview will recurse
+                    visually — the user can drag the panel out of
+                    the captured region to avoid that. */}
                 {!resultUrl && (
                   <div
-                    className="relative flex-1 flex items-center justify-center text-center px-6"
+                    className="relative flex-1 overflow-hidden"
                     style={{
                       background: 'linear-gradient(180deg, rgba(20,12,44,0.6) 0%, rgba(8,6,18,0.95) 100%)',
                     }}
                   >
-                    {phase === 'recording' ? (
-                      <div>
-                        <div className="flex items-center justify-center gap-2 mb-2">
-                          <motion.span
-                            className="w-2.5 h-2.5 rounded-full bg-red-500"
-                            animate={{ opacity: [1, 0.35, 1] }}
-                            transition={{ duration: 1, repeat: Infinity, ease: 'easeInOut' }}
-                          />
-                          <span className="text-[16px] font-bold text-white tabular-nums">
-                            REC {formatTime(elapsedMs)}
-                          </span>
-                        </div>
-                        <div className="text-[10.5px] text-white/55 leading-snug max-w-[240px] mx-auto">
-                          A separate Picture-in-Picture window is showing the live composite. Stop from there or from your browser's Stop sharing bar.
+                    {/* Live screen-capture preview — visible from the
+                        moment chooseWindow finishes through end of
+                        recording. */}
+                    {(phase === 'ready_to_record' || phase === 'recording' || phase === 'finalizing') && screenStreamRef.current && (
+                      <video
+                        autoPlay
+                        muted
+                        playsInline
+                        ref={(el) => {
+                          if (el && !el.srcObject && screenStreamRef.current) {
+                            el.srcObject = screenStreamRef.current;
+                          }
+                        }}
+                        className="absolute inset-0 w-full h-full object-cover bg-black"
+                      />
+                    )}
+
+                    {phase === 'recording' && (
+                      <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-2.5 py-1 rounded-full pointer-events-none"
+                        style={{ background: 'rgba(239,68,68,0.92)', boxShadow: '0 4px 12px rgba(0,0,0,0.4)' }}
+                      >
+                        <motion.span
+                          className="w-1.5 h-1.5 rounded-full bg-white"
+                          animate={{ opacity: [1, 0.35, 1] }}
+                          transition={{ duration: 1, repeat: Infinity, ease: 'easeInOut' }}
+                        />
+                        <span className="text-[10px] font-bold text-white tabular-nums">REC {formatTime(elapsedMs)}</span>
+                      </div>
+                    )}
+
+                    {phase === 'requesting_screen' && (
+                      <div className="absolute inset-0 flex items-center justify-center text-center px-6">
+                        <div>
+                          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.85)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
+                            <rect x="2" y="3" width="20" height="14" rx="2" />
+                            <line x1="8" y1="21" x2="16" y2="21" />
+                            <line x1="12" y1="17" x2="12" y2="21" />
+                          </svg>
+                          <div className="text-[12px] text-white/85 font-semibold mb-1">Pick the window to share</div>
+                          <div className="text-[10.5px] text-white/55 leading-snug">
+                            Choose the Ghost Session window in your browser's screen-share dialog.
+                          </div>
                         </div>
                       </div>
-                    ) : phase === 'requesting_screen' ? (
-                      <div>
-                        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.85)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
-                          <rect x="2" y="3" width="20" height="14" rx="2" />
-                          <line x1="8" y1="21" x2="16" y2="21" />
-                          <line x1="12" y1="17" x2="12" y2="21" />
-                        </svg>
-                        <div className="text-[12px] text-white/85 font-semibold mb-1">Pick the window to share</div>
-                        <div className="text-[10.5px] text-white/55 leading-snug">
-                          Choose the Ghost Session window in your browser's screen-share dialog.
-                        </div>
-                      </div>
-                    ) : (
-                      <div>
-                        <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.65)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
-                          <rect x="2" y="3" width="20" height="14" rx="2" />
-                          <line x1="8" y1="21" x2="16" y2="21" />
-                          <line x1="12" y1="17" x2="12" y2="21" />
-                        </svg>
-                        <div className="text-[12px] text-white/80 font-semibold mb-1">App goes here</div>
-                        <div className="text-[10.5px] text-white/50 leading-snug">
-                          Hit record, then choose the Ghost Session window when your browser asks. The bar at the bottom of your browser stops the take.
+                    )}
+
+                    {(phase === 'requesting_camera' || phase === 'previewing') && (
+                      <div className="absolute inset-0 flex items-center justify-center text-center px-6">
+                        <div>
+                          <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="rgba(168,134,255,0.65)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" className="mx-auto mb-2">
+                            <rect x="2" y="3" width="20" height="14" rx="2" />
+                            <line x1="8" y1="21" x2="16" y2="21" />
+                            <line x1="12" y1="17" x2="12" y2="21" />
+                          </svg>
+                          <div className="text-[12px] text-white/80 font-semibold mb-1">Choose a window to share</div>
+                          <div className="text-[10.5px] text-white/50 leading-snug max-w-[240px] mx-auto">
+                            Click the button below and pick the Ghost Session window so it appears here under your camera.
+                          </div>
                         </div>
                       </div>
                     )}
@@ -770,7 +717,26 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                   {phase === 'previewing' && !resultUrl && (
                     <button
                       type="button"
-                      onClick={startRecording}
+                      onClick={chooseWindow}
+                      className="px-5 h-11 rounded-full text-[12.5px] font-bold text-white flex items-center gap-2"
+                      style={{
+                        background: 'linear-gradient(180deg, #7C3AED 0%, #581C87 100%)',
+                        boxShadow: '0 6px 18px rgba(124,58,237,0.35)',
+                      }}
+                      title="Choose window to share"
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <rect x="2" y="3" width="20" height="14" rx="2" />
+                        <line x1="8" y1="21" x2="16" y2="21" />
+                        <line x1="12" y1="17" x2="12" y2="21" />
+                      </svg>
+                      Choose Window
+                    </button>
+                  )}
+                  {phase === 'ready_to_record' && (
+                    <button
+                      type="button"
+                      onClick={beginRecording}
                       className="w-16 h-16 rounded-full flex items-center justify-center transition-transform hover:scale-105 active:scale-95"
                       style={{
                         background: 'rgba(255,255,255,0.95)',
