@@ -30,11 +30,13 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
   const toggleRowMuted = useDrumRack((s) => s.toggleRowMuted);
   const toggleStep = useDrumRack((s) => s.toggleStep);
   const setStepVelocity = useDrumRack((s) => s.setStepVelocity);
-  const setStepTriplet = useDrumRack((s) => s.setStepTriplet);
-  // Triplet brush — local UI mode. While ON, a click on a cell marks
-  // that cell as a triplet hit (3 notes inside its own slot) instead
-  // of toggling a straight hit. Doesn't change anything about the rest
-  // of the pattern; the grid stays on straight 16ths.
+  const convertStepToTriplet = useDrumRack((s) => s.convertStepToTriplet);
+  const setStepSubVelocity = useDrumRack((s) => s.setStepSubVelocity);
+  // Triplet brush — local UI mode. While ON, clicking a non-triplet
+  // cell SPLITS that cell into three sub-cells (a triplet group).
+  // Once a cell is split, its three sub-cells are independently
+  // clickable + draggable regardless of brush state. Brush only
+  // controls the single → triplet conversion.
   const [tripletBrush, setTripletBrush] = useState(false);
   const clearClip = useDrumRack((s) => s.clearClip);
   const setPatternSteps = useDrumRack((s) => s.setPatternSteps);
@@ -260,14 +262,15 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
             rowIdx={rowIdx}
             patternSteps={patternSteps}
             steps={selectedClip?.steps[rowIdx] ?? null}
-            tripletFlags={selectedClip?.tripletFlags?.[rowIdx] ?? null}
+            tripletSubs={selectedClip?.tripletSubs ?? null}
             clipSelected={!!selectedClip}
             currentStepIdx={currentStepIdx}
             tripletBrush={tripletBrush}
             onDrop={(source) => loadIntoRow(row.id, source)}
             onToggleStep={(idx) => selectedClip && toggleStep(selectedClip.id, rowIdx, idx)}
             onSetStepVelocity={(idx, v) => selectedClip && setStepVelocity(selectedClip.id, rowIdx, idx, v)}
-            onSetStepTriplet={(idx, isTriplet) => selectedClip && setStepTriplet(selectedClip.id, rowIdx, idx, isTriplet)}
+            onConvertToTriplet={(idx) => selectedClip && convertStepToTriplet(selectedClip.id, rowIdx, idx)}
+            onSetSubVelocity={(idx, sub, v) => selectedClip && setStepSubVelocity(selectedClip.id, rowIdx, idx, sub, v)}
             onSetVolume={(v) => setRowVolume(row.id, v)}
             onToggleMuted={() => toggleRowMuted(row.id)}
             onRemove={() => removeRow(row.id)}
@@ -285,19 +288,20 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
 
 // ── Single row ───────────────────────────────────────────────────────────
 
-function DrumRowItem({ row, patternSteps, steps, tripletFlags, clipSelected, currentStepIdx, tripletBrush, onDrop, onToggleStep, onSetStepVelocity, onSetStepTriplet, onSetVolume, onToggleMuted, onRemove }: {
+function DrumRowItem({ row, rowIdx, patternSteps, steps, tripletSubs, clipSelected, currentStepIdx, tripletBrush, onDrop, onToggleStep, onSetStepVelocity, onConvertToTriplet, onSetSubVelocity, onSetVolume, onToggleMuted, onRemove }: {
   row: DrumRow;
   rowIdx: number;
   patternSteps: number;
   steps: number[] | null;
-  tripletFlags: boolean[] | null;
+  tripletSubs: Record<string, [number, number, number]> | null;
   clipSelected: boolean;
   currentStepIdx: number;
   tripletBrush: boolean;
   onDrop: (source: { kind: 'os'; file: File } | { kind: 'library'; id: string; name: string } | { kind: 'projectFile'; id: string; name: string }) => void;
   onToggleStep: (idx: number) => void;
   onSetStepVelocity: (idx: number, velocity: number) => void;
-  onSetStepTriplet: (idx: number, isTriplet: boolean) => void;
+  onConvertToTriplet: (idx: number) => void;
+  onSetSubVelocity: (idx: number, subIdx: 0 | 1 | 2, velocity: number) => void;
   onSetVolume: (v: number) => void;
   onToggleMuted: () => void;
   onRemove: () => void;
@@ -389,20 +393,34 @@ function DrumRowItem({ row, patternSteps, steps, tripletFlags, clipSelected, cur
           fill that reflects the velocity from the bottom up. */}
       <div className="flex-1 flex items-center gap-[2px]">
         {Array.from({ length: patternSteps }).map((_, i) => {
-          const isTriplet = !!tripletFlags?.[i];
+          const subs = tripletSubs?.[`${rowIdx}:${i}`];
+          if (subs) {
+            return (
+              <TripletStepCell
+                key={i}
+                beatStart={i % 4 === 0}
+                playing={i === currentStepIdx}
+                subs={subs}
+                disabled={!clipSelected}
+                onToggleSub={(sub) => onSetSubVelocity(i, sub, subs[sub] > 0 ? 0 : 1)}
+                onSetSubVelocity={(sub, v) => onSetSubVelocity(i, sub, v)}
+                label={`Step ${i + 1}`}
+              />
+            );
+          }
           return (
             <StepCell
               key={i}
               beatStart={i % 4 === 0}
               playing={i === currentStepIdx}
               velocity={steps?.[i] ?? 0}
-              triplet={isTriplet}
               disabled={!clipSelected}
-              // In triplet-brush mode a click adds (or removes) a
-              // triplet flag on the cell; otherwise it falls through
-              // to the existing on/off toggle.
+              // In triplet-brush mode a click on a non-triplet cell
+              // SPLITS that cell into three sub-cells (a triplet).
+              // Without the brush, the click falls through to the
+              // regular on/off toggle.
               onToggle={() => {
-                if (tripletBrush) onSetStepTriplet(i, !isTriplet);
+                if (tripletBrush) onConvertToTriplet(i);
                 else onToggleStep(i);
               }}
               onSetVelocity={(v) => onSetStepVelocity(i, v)}
@@ -437,11 +455,10 @@ function DrumRowItem({ row, patternSteps, steps, tripletFlags, clipSelected, cur
 //     to (velocity × cellHeight). When the playhead is on the cell the
 //     fill brightens; off-cells get a soft column glow so the playhead
 //     is still visible on empty rows.
-function StepCell({ beatStart, playing, velocity, triplet, disabled, onToggle, onSetVelocity, label }: {
+function StepCell({ beatStart, playing, velocity, disabled, onToggle, onSetVelocity, label }: {
   beatStart: boolean;
   playing: boolean;
   velocity: number;
-  triplet: boolean;
   disabled: boolean;
   onToggle: () => void;
   onSetVelocity: (v: number) => void;
@@ -525,50 +542,146 @@ function StepCell({ beatStart, playing, velocity, triplet, disabled, onToggle, o
         opacity: disabled ? 0.4 : 1,
         touchAction: 'none',
       }}
-      title={
-        disabled
-          ? 'Select a clip first'
-          : triplet
-            ? `${label} — TRIPLET (3 hits inside one cell). Drag up/down to set velocity (${Math.round(velocity * 100)}%)`
-            : `${label} — drag up/down to set velocity (${Math.round(velocity * 100)}%)`
-      }
+      title={disabled ? 'Select a clip first' : `${label} — drag up/down to set velocity (${Math.round(velocity * 100)}%)`}
     >
-      {/* Velocity fill — vertical bar(s) rising from the bottom to the
-          current velocity. A triplet cell renders 3 thin parallel bars
-          so the user can see at a glance that the cell will fire
-          three notes; a straight cell uses a single full-width fill. */}
-      {triplet ? (
-        <>
-          {[0.13, 0.44, 0.74].map((leftFrac, idx) => (
-            <div
-              key={idx}
-              className="absolute bottom-0 transition-[height] duration-75"
-              style={{
-                left: `${leftFrac * 100}%`,
-                width: '13%',
-                height: `${fillPct}%`,
-                background: fillColor,
-                boxShadow: glow,
-                borderRadius: 1,
-              }}
-            />
-          ))}
-        </>
-      ) : (
+      <div
+        className="absolute left-0 right-0 bottom-0 transition-[height] duration-75"
+        style={{
+          height: `${fillPct}%`,
+          background: fillColor,
+          boxShadow: glow,
+        }}
+      />
+      {on && (
         <div
-          className="absolute left-0 right-0 bottom-0 transition-[height] duration-75"
+          className="absolute left-0 right-0 transition-[bottom] duration-75 pointer-events-none"
           style={{
-            height: `${fillPct}%`,
-            background: fillColor,
-            boxShadow: glow,
+            bottom: `${fillPct}%`,
+            height: 1.5,
+            background: playing ? 'rgba(255,255,255,0.85)' : 'rgba(255,255,255,0.55)',
+            boxShadow: '0 0 4px rgba(0,255,200,0.6)',
           }}
         />
       )}
-      {/* Top edge highlight — small horizontal line at the top of the
-          fill so the velocity level reads cleanly even at very low
-          values. Spans the cell on straight cells; on triplet cells
-          the per-bar borderRadius already gives enough definition. */}
-      {on && !triplet && (
+    </div>
+  );
+}
+
+// A cell that's been converted to a triplet — visually splits into
+// three slim sub-cells inside the same total width so the row's grid
+// rhythm stays unchanged. Each sub-cell is independently clickable
+// (toggle on/off) and draggable (velocity), so the user can dial in
+// any subset of the three triplet positions. When all three sub
+// velocities reach 0, the store auto-removes the triplet entry and
+// the cell renders as a regular empty StepCell again.
+function TripletStepCell({ beatStart, playing, subs, disabled, onToggleSub, onSetSubVelocity, label }: {
+  beatStart: boolean;
+  playing: boolean;
+  subs: [number, number, number];
+  disabled: boolean;
+  onToggleSub: (subIdx: 0 | 1 | 2) => void;
+  onSetSubVelocity: (subIdx: 0 | 1 | 2, velocity: number) => void;
+  label: string;
+}) {
+  return (
+    <div
+      className="relative flex-1 h-6 rounded-sm overflow-hidden flex gap-[1px]"
+      style={{
+        background: beatStart ? 'rgba(255,255,255,0.05)' : 'rgba(255,255,255,0.025)',
+        // Tiny purple frame so the triplet group reads as one logical
+        // unit even though it's three sub-cells. Doesn't intercept
+        // pointer events — children handle their own clicks.
+        outline: '1px solid rgba(168, 85, 247, 0.30)',
+        outlineOffset: -1,
+      }}
+    >
+      {([0, 1, 2] as const).map((subIdx) => (
+        <TripletSubCell
+          key={subIdx}
+          velocity={subs[subIdx]}
+          playing={playing}
+          disabled={disabled}
+          onToggle={() => onToggleSub(subIdx)}
+          onSetVelocity={(v) => onSetSubVelocity(subIdx, v)}
+          label={`${label} · sub ${subIdx + 1}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+// A single sub-cell of a triplet group. Identical interaction model
+// to StepCell (click toggles, drag sets velocity, vertical fill bar)
+// but rendered narrow and in-place inside the parent triplet cell.
+function TripletSubCell({ velocity, playing, disabled, onToggle, onSetVelocity, label }: {
+  velocity: number;
+  playing: boolean;
+  disabled: boolean;
+  onToggle: () => void;
+  onSetVelocity: (v: number) => void;
+  label: string;
+}) {
+  const elRef = useRef<HTMLDivElement>(null);
+  const dragStateRef = useRef<{ startY: number; startV: number; height: number; moved: boolean } | null>(null);
+
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (disabled || e.button !== 0) return;
+    const rect = elRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    e.preventDefault();
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture?.(e.pointerId);
+    dragStateRef.current = { startY: e.clientY, startV: velocity, height: rect.height, moved: false };
+  };
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragStateRef.current;
+    if (!st) return;
+    const dy = st.startY - e.clientY;
+    if (!st.moved && Math.abs(dy) < 3) return;
+    st.moved = true;
+    const base = st.startV > 0 ? st.startV : 0;
+    const next = Math.max(0, Math.min(1, base + dy / st.height));
+    onSetVelocity(next);
+  };
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const st = dragStateRef.current;
+    dragStateRef.current = null;
+    if (!st) return;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    if (!st.moved) onToggle();
+  };
+
+  const on = velocity > 0;
+  const fillColor = on
+    ? (playing ? 'hsl(165, 95%, 70%)' : 'hsl(165, 70%, 45%)')
+    : 'transparent';
+  const fillPct = Math.max(0, Math.min(1, velocity)) * 100;
+  const glow = on && playing
+    ? '0 0 10px hsla(165, 95%, 70%, 0.85), inset 0 1px 0 rgba(255,255,255,0.5)'
+    : on
+      ? 'inset 0 1px 0 rgba(255,255,255,0.25), inset 0 -1px 0 rgba(0,0,0,0.25)'
+      : undefined;
+
+  return (
+    <div
+      ref={elRef}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      className="relative flex-1 h-full overflow-hidden"
+      style={{
+        cursor: disabled ? 'not-allowed' : on ? 'ns-resize' : 'pointer',
+        opacity: disabled ? 0.4 : 1,
+        touchAction: 'none',
+      }}
+      title={disabled ? 'Select a clip first' : `${label} — drag up/down to set velocity (${Math.round(velocity * 100)}%)`}
+    >
+      <div
+        className="absolute left-0 right-0 bottom-0 transition-[height] duration-75"
+        style={{ height: `${fillPct}%`, background: fillColor, boxShadow: glow }}
+      />
+      {on && (
         <div
           className="absolute left-0 right-0 transition-[bottom] duration-75 pointer-events-none"
           style={{

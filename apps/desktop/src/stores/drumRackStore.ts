@@ -39,13 +39,20 @@ export interface DrumClip {
   // user can drag a cell to dial in any value in (0, 1]. New rows added
   // later get auto-padded with zeros.
   steps: number[][];
-  // Parallel grid marking individual cells as triplet hits — when a
-  // cell's tripletFlag is true and its velocity is > 0, the scheduler
-  // fires THREE hits inside that single cell's duration (at triplet
-  // sub-spacing) instead of one. Default empty / undefined = all
-  // cells fire as single hits. The pattern as a whole stays on the
-  // straight 16th grid; triplets only affect the marked cells.
-  tripletFlags?: boolean[][];
+  // Sparse map of cells that are TRIPLET cells. Key = `${rowIdx}:${stepIdx}`,
+  // value = three sub-velocities (the three notes inside the cell's
+  // duration, at offsets 0, stepDur/3, 2·stepDur/3). When a (r,s) is
+  // present in this map, the cell is a triplet and `steps[r][s]` is
+  // ignored — the three subs drive playback. Storing as a sparse map
+  // (instead of a 3D array) keeps the data shape clean: only cells the
+  // user explicitly converts to triplet take up space.
+  tripletSubs?: Record<string, [number, number, number]>;
+}
+
+/** Build the sparse-map key used by `tripletSubs`. Centralised so
+ * any future lookup / write goes through the same format. */
+export function tripletKey(rowIdx: number, stepIdx: number): string {
+  return `${rowIdx}:${stepIdx}`;
 }
 
 interface DrumRackState {
@@ -85,11 +92,17 @@ interface DrumRackState {
   // Set the velocity of a single step. velocity in [0, 1]; 0 turns the
   // step off. Used by the click-and-drag interaction in the step grid.
   setStepVelocity: (clipId: string, rowIdx: number, stepIdx: number, velocity: number) => void;
-  // Mark / unmark a single step as a triplet hit. The cell stays in
-  // its straight-grid position; only its INTERNAL firing is split
-  // into three subdivisions. Setting velocity to 0 elsewhere
-  // automatically clears the triplet flag.
-  setStepTriplet: (clipId: string, rowIdx: number, stepIdx: number, isTriplet: boolean) => void;
+  // Convert a cell to a triplet — splits the cell into three sub-hits
+  // at velocity 1.0 each. The original `steps[r][s]` is zeroed; the
+  // three sub-velocities drive playback. Idempotent: calling on a
+  // cell that's already triplet leaves it alone.
+  convertStepToTriplet: (clipId: string, rowIdx: number, stepIdx: number) => void;
+  // Set the velocity of one of the three sub-positions inside a
+  // triplet cell. If all three subs reach 0 the cell automatically
+  // un-tripletizes (the entry is dropped from the sparse map) so the
+  // grid reads as empty again — matching the toggle-off semantics of
+  // a regular cell.
+  setStepSubVelocity: (clipId: string, rowIdx: number, stepIdx: number, subIdx: 0 | 1 | 2, velocity: number) => void;
   clearClip: (clipId: string) => void;
 
   // Scheduler
@@ -167,17 +180,18 @@ function emptySteps(rowCount: number, patternSteps: number): number[][] {
   return Array.from({ length: rowCount }, () => new Array(patternSteps).fill(0));
 }
 
-// Helper used by setStepTriplet/toggleStep to allocate a fresh
-// triplet-flag matrix on demand without forcing all clips to carry an
-// empty grid up-front.
-function ensureTripletFlags(rowCount: number, patternSteps: number, existing?: boolean[][]): boolean[][] {
-  const out: boolean[][] = [];
-  for (let r = 0; r < rowCount; r++) {
-    const row = existing?.[r];
-    if (row && row.length === patternSteps) out.push(row.slice());
-    else out.push(new Array(patternSteps).fill(false));
-  }
-  return out;
+// Drop any tripletSubs entries pointing at (rowIdx, stepIdx). Used
+// when a step is toggled off or has its main velocity set — the cell
+// can't be both a single hit and a triplet, so the triplet entry
+// retires with the on-state. Returns the same map untouched if there
+// was nothing to drop, so the caller can keep the reference stable.
+function dropTripletAt(map: Record<string, [number, number, number]> | undefined, rowIdx: number, stepIdx: number): Record<string, [number, number, number]> | undefined {
+  if (!map) return undefined;
+  const k = tripletKey(rowIdx, stepIdx);
+  if (!(k in map)) return map;
+  const next = { ...map };
+  delete next[k];
+  return next;
 }
 
 // Migration helper — old projects stored steps as boolean[][]; new
@@ -293,33 +307,35 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       const stepDur = 60 / bpm / 4;
       const fullCycle = n * stepDur;
       const lengthSec = Math.max(c.lengthSec, fullCycle);
-      // Resize the parallel triplet-flag grid (if any) to the new
-      // pattern length so flags stay aligned to their cells.
-      const tripletFlags = c.tripletFlags?.map((row) => {
-        const next = new Array(n).fill(false);
-        for (let i = 0; i < Math.min(n, row.length); i++) next[i] = row[i];
-        return next;
-      });
-      return { ...c, patternSteps: n, steps, lengthSec, tripletFlags };
+      // Drop any triplet entries that point past the new pattern
+      // length (e.g. shrinking 32 → 16 nukes triplets at steps 16+).
+      let tripletSubs = c.tripletSubs;
+      if (tripletSubs) {
+        const next: Record<string, [number, number, number]> = {};
+        for (const k of Object.keys(tripletSubs)) {
+          const [, sStr] = k.split(':');
+          if (parseInt(sStr, 10) < n) next[k] = tripletSubs[k];
+        }
+        tripletSubs = next;
+      }
+      return { ...c, patternSteps: n, steps, lengthSec, tripletSubs };
     }),
   })),
 
   toggleStep: (clipId, rowIdx, stepIdx) => set((s) => ({
     clips: s.clips.map((c) => {
       if (c.id !== clipId) return c;
+      // If the cell is currently a triplet, a regular toggle empties
+      // the whole triplet at once.
+      const k = tripletKey(rowIdx, stepIdx);
+      if (c.tripletSubs && k in c.tripletSubs) {
+        return { ...c, tripletSubs: dropTripletAt(c.tripletSubs, rowIdx, stepIdx) };
+      }
       const steps = c.steps.map((r) => r.slice());
       if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
       const wasOn = steps[rowIdx][stepIdx] > 0;
-      // 0 → 1.0 (default full velocity). Any non-zero velocity → 0 (off).
       steps[rowIdx][stepIdx] = wasOn ? 0 : 1;
-      // Turning a cell OFF also clears its triplet flag so a future
-      // straight click on that cell doesn't surprise-fire as triplet.
-      let tripletFlags = c.tripletFlags;
-      if (wasOn && tripletFlags?.[rowIdx]?.[stepIdx]) {
-        tripletFlags = tripletFlags.map((r, i) => (i === rowIdx ? r.slice() : r));
-        tripletFlags[rowIdx][stepIdx] = false;
-      }
-      return { ...c, steps, tripletFlags };
+      return { ...c, steps };
     }),
   })),
 
@@ -329,24 +345,47 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       const steps = c.steps.map((r) => r.slice());
       if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
       steps[rowIdx][stepIdx] = Math.max(0, Math.min(1, velocity));
-      return { ...c, steps };
+      // Setting a main velocity on a cell that was a triplet
+      // collapses it back to a single hit — the two states are
+      // mutually exclusive.
+      const tripletSubs = dropTripletAt(c.tripletSubs, rowIdx, stepIdx);
+      return { ...c, steps, tripletSubs };
     }),
   })),
 
-  setStepTriplet: (clipId, rowIdx, stepIdx, isTriplet) => set((s) => ({
+  convertStepToTriplet: (clipId, rowIdx, stepIdx) => set((s) => ({
     clips: s.clips.map((c) => {
       if (c.id !== clipId) return c;
-      const tripletFlags = ensureTripletFlags(c.steps.length, c.patternSteps, c.tripletFlags);
-      tripletFlags[rowIdx][stepIdx] = isTriplet;
-      // If the cell is being marked triplet, also turn it on (vel=1)
-      // so the user doesn't have to do two clicks to add a triplet.
-      let steps = c.steps;
-      if (isTriplet && (steps[rowIdx]?.[stepIdx] ?? 0) <= 0) {
-        steps = steps.map((r, i) => (i === rowIdx ? r.slice() : r));
-        if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
-        steps[rowIdx][stepIdx] = 1;
+      const k = tripletKey(rowIdx, stepIdx);
+      if (c.tripletSubs?.[k]) return c; // already triplet
+      const tripletSubs = { ...(c.tripletSubs || {}) };
+      tripletSubs[k] = [1, 1, 1];
+      // Zero the straight slot for this cell — playback now reads
+      // from the three subs and the main velocity must not double-fire.
+      const steps = c.steps.map((r, i) => (i === rowIdx ? r.slice() : r));
+      if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
+      steps[rowIdx][stepIdx] = 0;
+      return { ...c, steps, tripletSubs };
+    }),
+  })),
+
+  setStepSubVelocity: (clipId, rowIdx, stepIdx, subIdx, velocity) => set((s) => ({
+    clips: s.clips.map((c) => {
+      if (c.id !== clipId) return c;
+      const k = tripletKey(rowIdx, stepIdx);
+      const cur = c.tripletSubs?.[k];
+      if (!cur) return c; // can't sub-edit a non-triplet cell
+      const next: [number, number, number] = [cur[0], cur[1], cur[2]];
+      next[subIdx] = Math.max(0, Math.min(1, velocity));
+      const tripletSubs = { ...(c.tripletSubs || {}) };
+      // All-zero sub triple drops the entry — the cell goes back to
+      // empty. Matches the "toggle off" feel of a regular cell.
+      if (next[0] <= 0 && next[1] <= 0 && next[2] <= 0) {
+        delete tripletSubs[k];
+      } else {
+        tripletSubs[k] = next;
       }
-      return { ...c, steps, tripletFlags };
+      return { ...c, tripletSubs };
     }),
   })),
 
@@ -423,8 +462,21 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
           for (let r = 0; r < rows.length; r++) {
             const row = rows[r];
             if (row.muted || !row.buffer) continue;
-            const stepVelocity = clip.steps[r]?.[stepIdx] ?? 0;
-            if (stepVelocity <= 0) continue;
+            // Triplet cell takes precedence over the straight slot.
+            // The three sub-velocities drive playback at offsets 0,
+            // stepDur/3, 2·stepDur/3 — three notes in one cell's slot.
+            const subs = clip.tripletSubs?.[tripletKey(r, stepIdx)];
+            const hits: Array<{ off: number; vel: number }> = subs
+              ? [
+                  { off: 0, vel: subs[0] },
+                  { off: stepDur / 3, vel: subs[1] },
+                  { off: (2 * stepDur) / 3, vel: subs[2] },
+                ]
+              : (() => {
+                  const v = clip.steps[r]?.[stepIdx] ?? 0;
+                  return v > 0 ? [{ off: 0, vel: v }] : [];
+                })();
+            if (hits.length === 0) continue;
             // Lazily create a persistent per-row analyser → drum bus
             // connection. Every hit on this row routes through that
             // analyser so the row meter sees its own level, and the
@@ -437,21 +489,12 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
               rowAnalyser.connect(getDrumBus());
               rowAnalysers.set(row.id, rowAnalyser);
             }
-            // A triplet cell fires THREE hits inside its own slot
-            // (offsets 0, stepDur/3, 2*stepDur/3) — three notes in
-            // the duration of one straight 16th. The straight grid
-            // around it stays untouched.
-            const isTriplet = !!clip.tripletFlags?.[r]?.[stepIdx];
-            const offsets = isTriplet
-              ? [0, stepDur / 3, (2 * stepDur) / 3]
-              : [0];
-            for (const off of offsets) {
+            for (const { off, vel } of hits) {
+              if (vel <= 0) continue;
               const src = ctx.createBufferSource();
               src.buffer = row.buffer;
               const g = ctx.createGain();
-              // Per-step velocity multiplies the row's overall volume, so
-              // a low-velocity step on a high-volume row still fires soft.
-              g.gain.value = row.volume * stepVelocity;
+              g.gain.value = row.volume * vel;
               src.connect(g);
               g.connect(rowAnalyser);
               const when = stepProjectTime + off + startedAt;
