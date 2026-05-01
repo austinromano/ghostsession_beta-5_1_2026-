@@ -144,6 +144,9 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   // landed (browsers don't always show a download bar by default,
   // and a webview embed doesn't show one at all).
   const [savedToast, setSavedToast] = useState<string | null>(null);
+  // Share menu visibility. Opened from the review-state Share
+  // button. Hides when the user picks a destination or closes it.
+  const [showShareMenu, setShowShareMenu] = useState(false);
 
   // Holds every track / node we create here so cleanup is deterministic.
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -533,7 +536,57 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     if (resultUrl) URL.revokeObjectURL(resultUrl);
     setResultUrl(null);
     setElapsedMs(0);
+    setShowShareMenu(false);
     setPhase('previewing');
+  }
+
+  // Try the native Web Share API first — on mobile this opens the
+  // OS share sheet with Instagram / TikTok / X / etc. as one-tap
+  // targets. On desktop browsers the API rarely accepts video
+  // files, so we fall back to a popover with launchers that open
+  // the platform's web upload page in a new tab. Truly *automatic*
+  // posting to Instagram personal accounts isn't possible — Meta's
+  // Graph API only supports Business/Creator accounts via a Meta
+  // OAuth flow + app review, which would be a separate server-side
+  // integration phase.
+  async function shareResult() {
+    if (!resultUrl) return;
+    try {
+      const res = await fetch(resultUrl);
+      const blob = await res.blob();
+      const ext = resultMime.includes('mp4') ? 'mp4' : 'webm';
+      const fileName = `ghost-session-${Date.now()}.${ext}`;
+      const file = new File([blob], fileName, { type: blob.type });
+      const nav = navigator as Navigator & { canShare?: (data: { files: File[] }) => boolean; share?: (data: { files: File[]; title?: string; text?: string }) => Promise<void> };
+      if (nav.canShare && nav.share && nav.canShare({ files: [file] })) {
+        try {
+          await nav.share({
+            files: [file],
+            title: 'Ghost Session take',
+            text: 'Made with Ghost Session',
+          });
+          flashSaved('Shared');
+          return;
+        } catch {
+          // User cancelled the share sheet — fall through to the
+          // platform-launcher popover below.
+        }
+      }
+    } catch {
+      // fetch / File construction failed — still show the popover.
+    }
+    setShowShareMenu(true);
+  }
+
+  // Save-then-launch: the platform doesn't give us an API to upload
+  // a file from a web link, so we kick off a download (the user
+  // already has the file in Downloads) and open the platform's
+  // upload page in a new tab. The user manually picks the freshly-
+  // downloaded file in the platform's uploader.
+  function saveAndOpen(url: string) {
+    downloadResult().catch(() => { /* ignore — open the platform anyway */ });
+    window.open(url, '_blank', 'noopener,noreferrer');
+    setShowShareMenu(false);
   }
 
   const formatTime = (ms: number): string => {
@@ -828,7 +881,7 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                       <button
                         type="button"
                         onClick={discardResult}
-                        className="px-4 h-10 rounded-full text-[12.5px] font-semibold text-white/85 hover:text-white"
+                        className="px-3 h-10 rounded-full text-[12px] font-semibold text-white/85 hover:text-white"
                         style={{ background: 'rgba(255,255,255,0.10)', border: '1px solid rgba(255,255,255,0.18)' }}
                       >
                         Retake
@@ -836,10 +889,24 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                       <button
                         type="button"
                         onClick={downloadResult}
-                        className="px-5 h-10 rounded-full text-[12.5px] font-semibold text-white"
+                        className="px-3.5 h-10 rounded-full text-[12px] font-semibold text-white"
                         style={{ background: 'linear-gradient(180deg, #ef4444 0%, #991b1b 100%)' }}
                       >
                         Save
+                      </button>
+                      <button
+                        type="button"
+                        onClick={shareResult}
+                        className="px-3.5 h-10 rounded-full text-[12px] font-semibold text-white flex items-center gap-1.5"
+                        style={{ background: 'linear-gradient(180deg, #7C3AED 0%, #581C87 100%)' }}
+                        title="Share to socials"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                          <circle cx="18" cy="5" r="3" /><circle cx="6" cy="12" r="3" /><circle cx="18" cy="19" r="3" />
+                          <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                          <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+                        </svg>
+                        Share
                       </button>
                     </>
                   )}
@@ -849,6 +916,68 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                     </span>
                   )}
                 </div>
+
+                {/* Share popover — opens over the preview when the
+                    user clicks Share and Web Share API can't take the
+                    file directly (true on most desktop browsers).
+                    Each row downloads the file and opens the
+                    platform's upload page so the user can pick the
+                    just-saved file from their Downloads folder. */}
+                <AnimatePresence>
+                  {showShareMenu && (
+                    <motion.div
+                      key="share-menu"
+                      initial={{ opacity: 0, y: 8 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, y: 8 }}
+                      transition={{ type: 'spring', stiffness: 280, damping: 26 }}
+                      className="absolute inset-0 flex items-center justify-center"
+                      style={{ background: 'rgba(8,6,18,0.92)', backdropFilter: 'blur(6px)' }}
+                    >
+                      <div className="w-[88%] rounded-xl p-3" style={{ background: 'rgba(20,14,40,0.95)', border: '1px solid rgba(168,134,255,0.22)' }}>
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="text-[12px] font-bold text-white">Share to…</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowShareMenu(false)}
+                            className="ml-auto w-5 h-5 flex items-center justify-center rounded text-white/55 hover:text-white hover:bg-white/[0.08]"
+                            title="Close"
+                          >
+                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                              <line x1="18" y1="6" x2="6" y2="18" />
+                              <line x1="6" y1="6" x2="18" y2="18" />
+                            </svg>
+                          </button>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <SharePlatformRow
+                            label="Instagram"
+                            color="linear-gradient(135deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%)"
+                            onClick={() => saveAndOpen('https://www.instagram.com/')}
+                          />
+                          <SharePlatformRow
+                            label="TikTok"
+                            color="#000"
+                            onClick={() => saveAndOpen('https://www.tiktok.com/upload?lang=en')}
+                          />
+                          <SharePlatformRow
+                            label="YouTube Shorts"
+                            color="#ff0000"
+                            onClick={() => saveAndOpen('https://www.youtube.com/upload')}
+                          />
+                          <SharePlatformRow
+                            label="X (Twitter)"
+                            color="#000"
+                            onClick={() => saveAndOpen('https://twitter.com/compose/tweet')}
+                          />
+                        </div>
+                        <div className="mt-2.5 text-[10px] text-white/45 leading-snug">
+                          The file downloads to your Downloads folder, then the platform opens — pick the just-saved video in their uploader. Direct posting from the desktop browser isn't supported by the platforms.
+                        </div>
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
               </div>
 
               <div className="mt-3 text-[11px] text-white/55 max-w-[360px] text-center">
@@ -881,5 +1010,36 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       </AnimatePresence>
 
     </>
+  );
+}
+
+// One row in the Share-to popover — coloured chip + platform name
+// + chevron. The platform's brand colour is set by the parent so
+// future additions don't need a new component.
+function SharePlatformRow({ label, color, onClick }: {
+  label: string;
+  color: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-left transition-colors hover:bg-white/[0.06]"
+    >
+      <span
+        aria-hidden
+        className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-white"
+        style={{ background: color }}
+      >
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5 12h14M13 5l7 7-7 7" />
+        </svg>
+      </span>
+      <span className="text-[12.5px] font-semibold text-white/95">{label}</span>
+      <svg className="ml-auto text-white/35" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="9 18 15 12 9 6" />
+      </svg>
+    </button>
   );
 }
