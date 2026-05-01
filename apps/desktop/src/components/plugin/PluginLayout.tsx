@@ -43,6 +43,7 @@ import SamplePackContentView from './SamplePackContentView';
 import AddFriendPopover from './AddFriendPopover';
 import ProjectHeaderBar from './ProjectHeaderBar';
 import CollaboratorsBar from './CollaboratorsBar';
+import RecordVerticalOverlay from './RecordVerticalOverlay';
 import WelcomeHero from '../onboarding/WelcomeHero';
 import FirstInviteNudge from '../onboarding/FirstInviteNudge';
 import MessagesView from '../messages/MessagesView';
@@ -363,6 +364,10 @@ export default function PluginLayout() {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showInbox, setShowInbox] = useState(false);
   const [showInvite, setShowInvite] = useState(false);
+  // Vertical-cam recorder overlay — opened from the record button in
+  // CollaboratorsBar. Lives at PluginLayout so it floats over every
+  // panel underneath.
+  const [showRecord, setShowRecord] = useState(false);
   const [showShare, setShowShare] = useState(false);
   const [friends, setFriends] = useState<{ id: string; displayName: string; avatarUrl: string | null }[]>([]);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
@@ -841,6 +846,7 @@ export default function PluginLayout() {
             {showInvite && selectedProjectId && (
               <InviteModal open={showInvite} onClose={() => setShowInvite(false)} projectId={selectedProjectId} />
             )}
+            <RecordVerticalOverlay open={showRecord} onClose={() => setShowRecord(false)} />
             {showInvite && samplePackState.selectedPackId && !selectedProjectId && (
               <InviteModal open={showInvite} onClose={() => setShowInvite(false)} projectId={samplePackState.selectedPackId} />
             )}
@@ -961,6 +967,7 @@ export default function PluginLayout() {
                             members={members}
                             onlineUsers={onlineUsers}
                             onInvite={() => setShowInvite(!showInvite)}
+                            onRecord={() => setShowRecord(true)}
                           />
 
                           <ArrangementDropZone projectId={selectedProjectId!} onFilesAdded={() => fetchProject(selectedProjectId!)}>
