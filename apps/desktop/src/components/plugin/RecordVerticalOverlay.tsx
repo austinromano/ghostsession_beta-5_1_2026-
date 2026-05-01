@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, useDragControls } from 'framer-motion';
 import { getCtx, getMasterFader } from '../../stores/audio/graph';
 
 // Vertical (9:16) composite recorder for TikTok / Reels / Shorts.
@@ -80,14 +80,27 @@ function drawCover(
 }
 
 function pickMimeType(): string | undefined {
+  // Try the most specific MP4 / H.264 codec strings first — modern
+  // Chromium (116+) and Safari accept these and we want MP4 output
+  // since TikTok / Reels / Shorts upload mp4 directly. Fall through
+  // to webm only if no mp4 candidate is supported on this engine.
   const candidates = [
+    'video/mp4;codecs=avc1.42E01E,mp4a.40.2',  // baseline 3.0 + AAC-LC (most universal)
+    'video/mp4;codecs=avc1.42001E,mp4a.40.2',
+    'video/mp4;codecs=avc1.4D401E,mp4a.40.2',  // main 3.0 + AAC-LC
+    'video/mp4;codecs=avc1.640028,mp4a.40.2',  // high 4.0 + AAC-LC
+    'video/mp4;codecs=h264,aac',
     'video/mp4;codecs=avc1,mp4a',
+    'video/mp4',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm',
   ];
+  if (typeof MediaRecorder === 'undefined') return undefined;
   for (const t of candidates) {
-    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t)) return t;
+    try {
+      if (MediaRecorder.isTypeSupported(t)) return t;
+    } catch { /* some browsers throw on unsupported strings instead of returning false */ }
   }
   return undefined;
 }
@@ -436,6 +449,12 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     return `${m}:${s}`;
   };
 
+  // Drag handling — the panel floats over the project and can be
+  // moved freely so the user can keep working underneath it. Drag
+  // is gated to a dedicated header bar via dragControls so clicks on
+  // the record/save buttons don't accidentally start a drag gesture.
+  const dragControls = useDragControls();
+
   // Hidden video elements + canvas live OUTSIDE the overlay so the
   // screen capture (which records the visible page) doesn't see
   // them, and so they keep playing when phase === 'recording'
@@ -470,33 +489,82 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
       <AnimatePresence>
         {open && !visibleHidden && (
           <motion.div
-            className="fixed inset-0 z-[100] flex items-center justify-center"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: 0.18 }}
-            style={{ background: 'rgba(0,0,0,0.78)', backdropFilter: 'blur(8px)' }}
+            // Floating, draggable panel — no full-screen backdrop so
+            // the user can keep using the project underneath. dragMomentum
+            // is off because momentum on a panel feels janky. constraints
+            // pin to the document body so the panel can't be flung
+            // off-screen.
+            drag
+            dragMomentum={false}
+            dragElastic={0.04}
+            dragControls={dragControls}
+            dragListener={false}
+            dragConstraints={{ left: -2000, right: 2000, top: -2000, bottom: 2000 }}
+            initial={{ opacity: 0, scale: 0.96, y: 8 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.96, y: 8 }}
+            transition={{ type: 'spring', stiffness: 260, damping: 26 }}
+            className="fixed z-[100]"
+            // Default-position the panel near the top-right so it
+            // doesn't cover the arrangement view. The user can drag
+            // it anywhere from there.
+            style={{ top: 96, right: 24 }}
           >
-            <div className="absolute inset-0" onClick={onClose} />
+            <div className="relative flex flex-col items-center">
+              {/* Drag-handle bar — the only place that initiates a
+                  drag gesture. Click-targets inside the frame stay
+                  free of drag interference. */}
+              <div
+                onPointerDown={(e) => {
+                  if (e.button !== 0) return;
+                  dragControls.start(e);
+                }}
+                className="w-full h-7 flex items-center justify-between px-2 rounded-t-2xl"
+                style={{
+                  width: 360,
+                  background: 'rgba(15,12,32,0.96)',
+                  borderBottom: '1px solid rgba(255,255,255,0.06)',
+                  cursor: 'grab',
+                  touchAction: 'none',
+                  userSelect: 'none',
+                }}
+                title="Drag to move"
+              >
+                <div className="flex items-center gap-1.5 text-white/55">
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="currentColor">
+                    <circle cx="9" cy="5" r="1.6" /><circle cx="9" cy="12" r="1.6" /><circle cx="9" cy="19" r="1.6" />
+                    <circle cx="15" cy="5" r="1.6" /><circle cx="15" cy="12" r="1.6" /><circle cx="15" cy="19" r="1.6" />
+                  </svg>
+                  <span className="text-[10.5px] font-semibold tracking-wide uppercase">Vertical Recorder</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  className="w-5 h-5 flex items-center justify-center rounded text-white/55 hover:text-white hover:bg-white/[0.06]"
+                  title="Close"
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                </button>
+              </div>
 
-            <motion.div
-              className="relative flex flex-col items-center"
-              initial={{ scale: 0.96, y: 8 }}
-              animate={{ scale: 1, y: 0 }}
-              exit={{ scale: 0.96, y: 8 }}
-              transition={{ type: 'spring', stiffness: 260, damping: 26 }}
-            >
               {/* 9:16 preview frame — shows what the recording will
                   look like. Camera fills the top region; bottom
                   region is a placeholder until the user clicks
                   record (which prompts for the screen share). */}
               <div
-                className="relative rounded-2xl overflow-hidden flex flex-col"
+                className="relative overflow-hidden flex flex-col"
                 style={{
                   width: 360,
                   height: 640,
                   background: '#0a0a0f',
                   border: '1px solid rgba(255,255,255,0.08)',
+                  borderTop: 'none',
+                  borderBottomLeftRadius: 16,
+                  borderBottomRightRadius: 16,
                   boxShadow: '0 20px 60px rgba(0,0,0,0.6), 0 0 0 4px rgba(168,85,247,0.12)',
                 }}
               >
@@ -550,22 +618,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                     className="absolute inset-0 w-full h-full object-cover bg-black"
                   />
                 )}
-
-                {/* Top-right close button — overlay-only chrome. */}
-                <div className="absolute top-2 right-2">
-                  <button
-                    type="button"
-                    onClick={onClose}
-                    className="w-7 h-7 rounded-full flex items-center justify-center text-white/85 hover:text-white"
-                    style={{ background: 'rgba(0,0,0,0.55)' }}
-                    title="Close"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
-                </div>
 
                 {phase === 'error' && error && (
                   <div className="absolute inset-0 flex items-center justify-center bg-black/85 px-6 text-center">
@@ -646,7 +698,7 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
                   </motion.div>
                 )}
               </AnimatePresence>
-            </motion.div>
+            </div>
           </motion.div>
         )}
       </AnimatePresence>
