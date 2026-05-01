@@ -98,6 +98,10 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [resultUrl, setResultUrl] = useState<string | null>(null);
   const [resultMime, setResultMime] = useState<string>('video/webm');
+  // Brief "Saved to Downloads" toast so the user can see the action
+  // landed (browsers don't always show a download bar by default,
+  // and a webview embed doesn't show one at all).
+  const [savedToast, setSavedToast] = useState<string | null>(null);
 
   // Holds every track / node we create here so cleanup is deterministic.
   const cameraStreamRef = useRef<MediaStream | null>(null);
@@ -353,15 +357,69 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
     }
   }
 
-  function downloadResult() {
+  async function downloadResult() {
     if (!resultUrl) return;
     const ext = resultMime.includes('mp4') ? 'mp4' : 'webm';
+    // ISO-style date so multiple takes don't collide and the file
+    // sorts chronologically in Downloads.
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const fileName = `ghost-session-${stamp}.${ext}`;
+
+    // Inside the JUCE plugin's WebView2 host the browser's anchor-
+    // click download is silently swallowed; the C++ side has its
+    // own ghost:// download protocol. To use it we need a fetchable
+    // URL — the original blob: URL is scoped to the page, so we
+    // fetch the blob, base64-encode it, and hand the data: URL to
+    // ghost://download-stem (which already accepts an arbitrary
+    // URL + fileName). For regular browsers the anchor path is
+    // taken and the file lands in the user's Downloads folder.
+    const isPlugin = !!(window as { chrome?: { webview?: unknown } }).chrome?.webview;
+
+    if (isPlugin) {
+      try {
+        const res = await fetch(resultUrl);
+        const buf = await res.arrayBuffer();
+        // Build base64 from Uint8Array — chunked so we don't hit
+        // the call-stack ceiling on long takes.
+        const bytes = new Uint8Array(buf);
+        let binary = '';
+        const chunk = 0x8000;
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+        }
+        const b64 = btoa(binary);
+        const dataUrl = `data:${resultMime};base64,${b64}`;
+        const ghostUrl = `ghost://download-stem?url=${encodeURIComponent(dataUrl)}&fileName=${encodeURIComponent(fileName)}`;
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        iframe.src = ghostUrl;
+        document.body.appendChild(iframe);
+        setTimeout(() => { try { iframe.remove(); } catch { /* ignore */ } }, 1500);
+        flashSaved(fileName);
+        return;
+      } catch (err) {
+        // Fall through to the anchor path on encode/fetch failure.
+        if (typeof console !== 'undefined') console.warn('[record] plugin download failed, falling back', err);
+      }
+    }
+
     const a = document.createElement('a');
     a.href = resultUrl;
-    a.download = `ghost-session-${Date.now()}.${ext}`;
+    a.download = fileName;
+    a.rel = 'noopener';
+    a.style.display = 'none';
     document.body.appendChild(a);
     a.click();
-    a.remove();
+    // Give the browser a tick to start streaming the blob before
+    // we yank the anchor — instant remove + revoke can race the
+    // download in some Chromium builds.
+    setTimeout(() => { try { a.remove(); } catch { /* ignore */ } }, 200);
+    flashSaved(fileName);
+  }
+
+  function flashSaved(fileName: string) {
+    setSavedToast(`Saved ${fileName} to Downloads`);
+    window.setTimeout(() => setSavedToast(null), 2400);
   }
 
   function discardResult() {
@@ -567,6 +625,27 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
               <div className="mt-3 text-[11px] text-white/55 max-w-[360px] text-center">
                 Top: your camera. Bottom: a screen capture of the app you pick. Audio is the project's master output — start playback before recording.
               </div>
+
+              {/* Saved-to-Downloads confirmation. AnimatePresence so
+                  the toast slides in/out instead of popping. */}
+              <AnimatePresence>
+                {savedToast && (
+                  <motion.div
+                    key="saved-toast"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 10 }}
+                    transition={{ type: 'spring', stiffness: 280, damping: 24 }}
+                    className="mt-2 px-3.5 py-1.5 rounded-full text-[11.5px] font-semibold text-white flex items-center gap-1.5"
+                    style={{ background: 'rgba(34,197,94,0.20)', border: '1px solid rgba(34,197,94,0.45)' }}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                    {savedToast}
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </motion.div>
           </motion.div>
         )}
