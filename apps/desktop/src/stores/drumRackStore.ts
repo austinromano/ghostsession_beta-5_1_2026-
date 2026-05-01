@@ -39,10 +39,13 @@ export interface DrumClip {
   // user can drag a cell to dial in any value in (0, 1]. New rows added
   // later get auto-padded with zeros.
   steps: number[][];
-  // When true, each cell is a 16th-note TRIPLET (60/bpm/6) instead of
-  // a straight 16th (60/bpm/4). Lets the user feel-flip a pattern
-  // between straight and triplet without rebuilding the grid.
-  triplet?: boolean;
+  // Parallel grid marking individual cells as triplet hits — when a
+  // cell's tripletFlag is true and its velocity is > 0, the scheduler
+  // fires THREE hits inside that single cell's duration (at triplet
+  // sub-spacing) instead of one. Default empty / undefined = all
+  // cells fire as single hits. The pattern as a whole stays on the
+  // straight 16th grid; triplets only affect the marked cells.
+  tripletFlags?: boolean[][];
 }
 
 interface DrumRackState {
@@ -82,9 +85,11 @@ interface DrumRackState {
   // Set the velocity of a single step. velocity in [0, 1]; 0 turns the
   // step off. Used by the click-and-drag interaction in the step grid.
   setStepVelocity: (clipId: string, rowIdx: number, stepIdx: number, velocity: number) => void;
-  // Toggle whether the clip plays as 16th triplets (true) or straight
-  // 16ths (false). Re-clamps lengthSec so a full pattern cycle fits.
-  setClipTriplet: (clipId: string, triplet: boolean) => void;
+  // Mark / unmark a single step as a triplet hit. The cell stays in
+  // its straight-grid position; only its INTERNAL firing is split
+  // into three subdivisions. Setting velocity to 0 elsewhere
+  // automatically clears the triplet flag.
+  setStepTriplet: (clipId: string, rowIdx: number, stepIdx: number, isTriplet: boolean) => void;
   clearClip: (clipId: string) => void;
 
   // Scheduler
@@ -162,14 +167,17 @@ function emptySteps(rowCount: number, patternSteps: number): number[][] {
   return Array.from({ length: rowCount }, () => new Array(patternSteps).fill(0));
 }
 
-// Step duration for a clip — straight 16th = quarter / 4, triplet 16th
-// = quarter / 6 (three notes in the space of two). Single source of
-// truth so the scheduler, currentStepIdx readouts, and lengthSec math
-// can't drift apart when triplet mode is toggled.
-export function stepDurForClip(clip: { triplet?: boolean }, projectBpm: number): number {
-  const bpm = projectBpm > 0 ? projectBpm : 120;
-  const sub = clip.triplet ? 6 : 4;
-  return 60 / bpm / sub;
+// Helper used by setStepTriplet/toggleStep to allocate a fresh
+// triplet-flag matrix on demand without forcing all clips to carry an
+// empty grid up-front.
+function ensureTripletFlags(rowCount: number, patternSteps: number, existing?: boolean[][]): boolean[][] {
+  const out: boolean[][] = [];
+  for (let r = 0; r < rowCount; r++) {
+    const row = existing?.[r];
+    if (row && row.length === patternSteps) out.push(row.slice());
+    else out.push(new Array(patternSteps).fill(false));
+  }
+  return out;
 }
 
 // Migration helper — old projects stored steps as boolean[][]; new
@@ -281,10 +289,18 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       // Matches FL Studio: pattern block defaults to pattern length.
       // Shrinking the pattern (32 → 16) leaves the clip alone — user
       // may have a longer clip that loops the pattern.
-      const stepDur = stepDurForClip(c, useAudioStore.getState().projectBpm);
+      const bpm = useAudioStore.getState().projectBpm || 120;
+      const stepDur = 60 / bpm / 4;
       const fullCycle = n * stepDur;
       const lengthSec = Math.max(c.lengthSec, fullCycle);
-      return { ...c, patternSteps: n, steps, lengthSec };
+      // Resize the parallel triplet-flag grid (if any) to the new
+      // pattern length so flags stay aligned to their cells.
+      const tripletFlags = c.tripletFlags?.map((row) => {
+        const next = new Array(n).fill(false);
+        for (let i = 0; i < Math.min(n, row.length); i++) next[i] = row[i];
+        return next;
+      });
+      return { ...c, patternSteps: n, steps, lengthSec, tripletFlags };
     }),
   })),
 
@@ -293,12 +309,17 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       if (c.id !== clipId) return c;
       const steps = c.steps.map((r) => r.slice());
       if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
+      const wasOn = steps[rowIdx][stepIdx] > 0;
       // 0 → 1.0 (default full velocity). Any non-zero velocity → 0 (off).
-      // Re-toggling preserves history through the velocity slot: the
-      // user dialled a value before turning off, so the next click
-      // restores 1.0 — keeps the toggle action predictable.
-      steps[rowIdx][stepIdx] = steps[rowIdx][stepIdx] > 0 ? 0 : 1;
-      return { ...c, steps };
+      steps[rowIdx][stepIdx] = wasOn ? 0 : 1;
+      // Turning a cell OFF also clears its triplet flag so a future
+      // straight click on that cell doesn't surprise-fire as triplet.
+      let tripletFlags = c.tripletFlags;
+      if (wasOn && tripletFlags?.[rowIdx]?.[stepIdx]) {
+        tripletFlags = tripletFlags.map((r, i) => (i === rowIdx ? r.slice() : r));
+        tripletFlags[rowIdx][stepIdx] = false;
+      }
+      return { ...c, steps, tripletFlags };
     }),
   })),
 
@@ -312,17 +333,20 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
     }),
   })),
 
-  setClipTriplet: (clipId, triplet) => set((s) => ({
+  setStepTriplet: (clipId, rowIdx, stepIdx, isTriplet) => set((s) => ({
     clips: s.clips.map((c) => {
       if (c.id !== clipId) return c;
-      const next = { ...c, triplet };
-      // Re-extend the clip if the new feel makes one full pattern
-      // cycle longer than the current lengthSec — otherwise the tail
-      // of the pattern would silently never play.
-      const stepDur = stepDurForClip(next, useAudioStore.getState().projectBpm);
-      const fullCycle = c.patternSteps * stepDur;
-      next.lengthSec = Math.max(c.lengthSec, fullCycle);
-      return next;
+      const tripletFlags = ensureTripletFlags(c.steps.length, c.patternSteps, c.tripletFlags);
+      tripletFlags[rowIdx][stepIdx] = isTriplet;
+      // If the cell is being marked triplet, also turn it on (vel=1)
+      // so the user doesn't have to do two clicks to add a triplet.
+      let steps = c.steps;
+      if (isTriplet && (steps[rowIdx]?.[stepIdx] ?? 0) <= 0) {
+        steps = steps.map((r, i) => (i === rowIdx ? r.slice() : r));
+        if (!steps[rowIdx]) steps[rowIdx] = new Array(c.patternSteps).fill(0);
+        steps[rowIdx][stepIdx] = 1;
+      }
+      return { ...c, steps, tripletFlags };
     }),
   })),
 
@@ -354,10 +378,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
       }
       wasPlaying = true;
       const projectBpm = audio.projectBpm > 0 ? audio.projectBpm : 120;
-      // Step duration is now per-clip (triplet vs straight). Computed
-      // inside the loop below; this baseline is only used to size the
-      // lookahead window.
-      const baselineStepDur = 60 / projectBpm / 4;
+      const stepDur = 60 / projectBpm / 4; // 16th note
       const lookahead = 0.12;
 
       // Use the sample-accurate ctx → project anchor instead of the
@@ -383,7 +404,6 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         if (clipEnd <= projectNow) continue;
         if (clip.startSec >= horizonProjectTime) continue;
         // Walk the clip's step indices that intersect the lookahead window.
-        const stepDur = stepDurForClip(clip, projectBpm);
         const clipDur = clip.lengthSec;
         const stepsPerClip = Math.floor(clipDur / stepDur);
         if (stepsPerClip <= 0) continue;
@@ -417,24 +437,31 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
               rowAnalyser.connect(getDrumBus());
               rowAnalysers.set(row.id, rowAnalyser);
             }
-            const src = ctx.createBufferSource();
-            src.buffer = row.buffer;
-            const g = ctx.createGain();
-            // Per-step velocity multiplies the row's overall volume, so
-            // a low-velocity step on a high-volume row still fires soft.
-            g.gain.value = row.volume * stepVelocity;
-            src.connect(g);
-            g.connect(rowAnalyser);
-            // when = stepProjectTime + startedAt is the sample-accurate
-            // ctx-time anchor (algebraically equal to ctxNow + (stepProjectTime - projectNow))
-            // but built directly off startedAt so we don't lose precision.
-            const when = stepProjectTime + startedAt;
-            src.start(Math.max(ctxNow, when));
-            activeSources.add(src);
-            src.onended = () => {
-              activeSources.delete(src);
-              try { src.disconnect(); g.disconnect(); } catch { /* ignore */ }
-            };
+            // A triplet cell fires THREE hits inside its own slot
+            // (offsets 0, stepDur/3, 2*stepDur/3) — three notes in
+            // the duration of one straight 16th. The straight grid
+            // around it stays untouched.
+            const isTriplet = !!clip.tripletFlags?.[r]?.[stepIdx];
+            const offsets = isTriplet
+              ? [0, stepDur / 3, (2 * stepDur) / 3]
+              : [0];
+            for (const off of offsets) {
+              const src = ctx.createBufferSource();
+              src.buffer = row.buffer;
+              const g = ctx.createGain();
+              // Per-step velocity multiplies the row's overall volume, so
+              // a low-velocity step on a high-volume row still fires soft.
+              g.gain.value = row.volume * stepVelocity;
+              src.connect(g);
+              g.connect(rowAnalyser);
+              const when = stepProjectTime + off + startedAt;
+              src.start(Math.max(ctxNow, when));
+              activeSources.add(src);
+              src.onended = () => {
+                activeSources.delete(src);
+                try { src.disconnect(); g.disconnect(); } catch { /* ignore */ }
+              };
+            }
           }
         }
       }
@@ -444,7 +471,7 @@ export const useDrumRack = create<DrumRackState>((set, get) => ({
         const cutoff = projectNow - 5;
         queued.forEach((k) => {
           const [, stepStr] = k.split(':');
-          const t = parseInt(stepStr, 10) * baselineStepDur;
+          const t = parseInt(stepStr, 10) * stepDur;
           if (t < cutoff) queued.delete(k);
         });
       }

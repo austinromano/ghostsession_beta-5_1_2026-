@@ -30,7 +30,12 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
   const toggleRowMuted = useDrumRack((s) => s.toggleRowMuted);
   const toggleStep = useDrumRack((s) => s.toggleStep);
   const setStepVelocity = useDrumRack((s) => s.setStepVelocity);
-  const setClipTriplet = useDrumRack((s) => s.setClipTriplet);
+  const setStepTriplet = useDrumRack((s) => s.setStepTriplet);
+  // Triplet brush — local UI mode. While ON, a click on a cell marks
+  // that cell as a triplet hit (3 notes inside its own slot) instead
+  // of toggling a straight hit. Doesn't change anything about the rest
+  // of the pattern; the grid stays on straight 16ths.
+  const [tripletBrush, setTripletBrush] = useState(false);
   const clearClip = useDrumRack((s) => s.clearClip);
   const setPatternSteps = useDrumRack((s) => s.setPatternSteps);
   const createClipAt = useDrumRack((s) => s.createClipAt);
@@ -73,8 +78,7 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
     const t = s.currentTime;
     if (t < selectedClip.startSec || t >= selectedClip.startSec + selectedClip.lengthSec) return -1;
     const projectBpmNow = s.projectBpm > 0 ? s.projectBpm : 120;
-    const sub = selectedClip.triplet ? 6 : 4;
-    const stepDur = 60 / projectBpmNow / sub;
+    const stepDur = 60 / projectBpmNow / 4;
     const absStep = Math.floor((t - selectedClip.startSec) / Math.max(stepDur, 1e-6));
     return absStep % selectedClip.patternSteps;
   });
@@ -192,10 +196,10 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
             + Clip
           </button>
           <button
-            onClick={() => selectedClip && setClipTriplet(selectedClip.id, !selectedClip.triplet)}
+            onClick={() => setTripletBrush((v) => !v)}
             disabled={!selectedClip}
-            className={`px-2 py-0.5 rounded ${selectedClip?.triplet ? 'bg-ghost-green/20 text-ghost-green' : 'text-white/40 hover:bg-white/[0.06] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-white/40'}`}
-            title={selectedClip?.triplet ? 'Switch to straight 16ths' : 'Switch to 16th triplets'}
+            className={`px-2 py-0.5 rounded ${tripletBrush && selectedClip ? 'bg-ghost-green/20 text-ghost-green' : 'text-white/40 hover:bg-white/[0.06] hover:text-white disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-white/40'}`}
+            title={tripletBrush ? 'Triplet brush ON — clicks add triplet hits. Click again to disable.' : 'Triplet brush — turn on, then click cells to make them triplet hits (3 notes inside one cell)'}
           >
             3T
           </button>
@@ -256,12 +260,14 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
             rowIdx={rowIdx}
             patternSteps={patternSteps}
             steps={selectedClip?.steps[rowIdx] ?? null}
+            tripletFlags={selectedClip?.tripletFlags?.[rowIdx] ?? null}
             clipSelected={!!selectedClip}
             currentStepIdx={currentStepIdx}
-            triplet={!!selectedClip?.triplet}
+            tripletBrush={tripletBrush}
             onDrop={(source) => loadIntoRow(row.id, source)}
             onToggleStep={(idx) => selectedClip && toggleStep(selectedClip.id, rowIdx, idx)}
             onSetStepVelocity={(idx, v) => selectedClip && setStepVelocity(selectedClip.id, rowIdx, idx, v)}
+            onSetStepTriplet={(idx, isTriplet) => selectedClip && setStepTriplet(selectedClip.id, rowIdx, idx, isTriplet)}
             onSetVolume={(v) => setRowVolume(row.id, v)}
             onToggleMuted={() => toggleRowMuted(row.id)}
             onRemove={() => removeRow(row.id)}
@@ -279,17 +285,19 @@ export default function DrumRackPanel({ projectId }: { projectId: string }) {
 
 // ── Single row ───────────────────────────────────────────────────────────
 
-function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, triplet, onDrop, onToggleStep, onSetStepVelocity, onSetVolume, onToggleMuted, onRemove }: {
+function DrumRowItem({ row, patternSteps, steps, tripletFlags, clipSelected, currentStepIdx, tripletBrush, onDrop, onToggleStep, onSetStepVelocity, onSetStepTriplet, onSetVolume, onToggleMuted, onRemove }: {
   row: DrumRow;
   rowIdx: number;
   patternSteps: number;
   steps: number[] | null;
+  tripletFlags: boolean[] | null;
   clipSelected: boolean;
   currentStepIdx: number;
-  triplet: boolean;
+  tripletBrush: boolean;
   onDrop: (source: { kind: 'os'; file: File } | { kind: 'library'; id: string; name: string } | { kind: 'projectFile'; id: string; name: string }) => void;
   onToggleStep: (idx: number) => void;
   onSetStepVelocity: (idx: number, velocity: number) => void;
+  onSetStepTriplet: (idx: number, isTriplet: boolean) => void;
   onSetVolume: (v: number) => void;
   onToggleMuted: () => void;
   onRemove: () => void;
@@ -380,22 +388,28 @@ function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, t
           + drag-up-or-down-to-set-velocity affordance with a vertical
           fill that reflects the velocity from the bottom up. */}
       <div className="flex-1 flex items-center gap-[2px]">
-        {Array.from({ length: patternSteps }).map((_, i) => (
-          <StepCell
-            key={i}
-            // In triplet mode every 3 cells = an 8th-note triplet
-            // group; in straight mode every 4 cells = a beat. Group
-            // start gets the slightly brighter base background so the
-            // user can read the rhythmic structure at a glance.
-            beatStart={triplet ? i % 3 === 0 : i % 4 === 0}
-            playing={i === currentStepIdx}
-            velocity={steps?.[i] ?? 0}
-            disabled={!clipSelected}
-            onToggle={() => onToggleStep(i)}
-            onSetVelocity={(v) => onSetStepVelocity(i, v)}
-            label={`Step ${i + 1}`}
-          />
-        ))}
+        {Array.from({ length: patternSteps }).map((_, i) => {
+          const isTriplet = !!tripletFlags?.[i];
+          return (
+            <StepCell
+              key={i}
+              beatStart={i % 4 === 0}
+              playing={i === currentStepIdx}
+              velocity={steps?.[i] ?? 0}
+              triplet={isTriplet}
+              disabled={!clipSelected}
+              // In triplet-brush mode a click adds (or removes) a
+              // triplet flag on the cell; otherwise it falls through
+              // to the existing on/off toggle.
+              onToggle={() => {
+                if (tripletBrush) onSetStepTriplet(i, !isTriplet);
+                else onToggleStep(i);
+              }}
+              onSetVelocity={(v) => onSetStepVelocity(i, v)}
+              label={`Step ${i + 1}`}
+            />
+          );
+        })}
       </div>
 
       {/* Row controls */}
@@ -423,10 +437,11 @@ function DrumRowItem({ row, patternSteps, steps, clipSelected, currentStepIdx, t
 //     to (velocity × cellHeight). When the playhead is on the cell the
 //     fill brightens; off-cells get a soft column glow so the playhead
 //     is still visible on empty rows.
-function StepCell({ beatStart, playing, velocity, disabled, onToggle, onSetVelocity, label }: {
+function StepCell({ beatStart, playing, velocity, triplet, disabled, onToggle, onSetVelocity, label }: {
   beatStart: boolean;
   playing: boolean;
   velocity: number;
+  triplet: boolean;
   disabled: boolean;
   onToggle: () => void;
   onSetVelocity: (v: number) => void;
@@ -510,23 +525,50 @@ function StepCell({ beatStart, playing, velocity, disabled, onToggle, onSetVeloc
         opacity: disabled ? 0.4 : 1,
         touchAction: 'none',
       }}
-      title={disabled ? 'Select a clip first' : `${label} — drag up/down to set velocity (${Math.round(velocity * 100)}%)`}
+      title={
+        disabled
+          ? 'Select a clip first'
+          : triplet
+            ? `${label} — TRIPLET (3 hits inside one cell). Drag up/down to set velocity (${Math.round(velocity * 100)}%)`
+            : `${label} — drag up/down to set velocity (${Math.round(velocity * 100)}%)`
+      }
     >
-      {/* Velocity fill — vertical bar rising from the bottom of the
-          cell to the current velocity. Height interpolates so a drag
-          reads as the bar following the pointer. */}
-      <div
-        className="absolute left-0 right-0 bottom-0 transition-[height] duration-75"
-        style={{
-          height: `${fillPct}%`,
-          background: fillColor,
-          boxShadow: glow,
-        }}
-      />
+      {/* Velocity fill — vertical bar(s) rising from the bottom to the
+          current velocity. A triplet cell renders 3 thin parallel bars
+          so the user can see at a glance that the cell will fire
+          three notes; a straight cell uses a single full-width fill. */}
+      {triplet ? (
+        <>
+          {[0.13, 0.44, 0.74].map((leftFrac, idx) => (
+            <div
+              key={idx}
+              className="absolute bottom-0 transition-[height] duration-75"
+              style={{
+                left: `${leftFrac * 100}%`,
+                width: '13%',
+                height: `${fillPct}%`,
+                background: fillColor,
+                boxShadow: glow,
+                borderRadius: 1,
+              }}
+            />
+          ))}
+        </>
+      ) : (
+        <div
+          className="absolute left-0 right-0 bottom-0 transition-[height] duration-75"
+          style={{
+            height: `${fillPct}%`,
+            background: fillColor,
+            boxShadow: glow,
+          }}
+        />
+      )}
       {/* Top edge highlight — small horizontal line at the top of the
           fill so the velocity level reads cleanly even at very low
-          values where the fill body would otherwise be invisible. */}
-      {on && (
+          values. Spans the cell on straight cells; on triplet cells
+          the per-bar borderRadius already gives enough definition. */}
+      {on && !triplet && (
         <div
           className="absolute left-0 right-0 transition-[bottom] duration-75 pointer-events-none"
           style={{
