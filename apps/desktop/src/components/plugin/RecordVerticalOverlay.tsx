@@ -108,6 +108,105 @@ function drawStretch(
   } catch { /* video may not be ready yet */ }
 }
 
+// Draw the cartoon Ghost Session mascot (a Pac-Man-style ghost, mint
+// green) centered at (cx, cy) with given outer width. Pure paths so
+// it's resolution-independent and no image load is needed.
+function drawGhostMascot(ctx: CanvasRenderingContext2D, cx: number, cy: number, w: number): void {
+  const h = w * 1.05;
+  const x = cx - w / 2;
+  const y = cy - h / 2;
+  const radius = w / 2;
+  const bumpHeight = w * 0.10;
+  ctx.save();
+  // Body — dome on top, three rounded bumps on the bottom.
+  ctx.fillStyle = '#23E5A8';
+  ctx.beginPath();
+  ctx.arc(cx, y + radius, radius, Math.PI, 0, false);     // top semicircle
+  ctx.lineTo(x + w, y + h - bumpHeight);                  // right side down
+  // 3 wavy bumps along the bottom (right → left).
+  ctx.quadraticCurveTo(x + w * 0.83, y + h, x + w * 0.66, y + h - bumpHeight);
+  ctx.quadraticCurveTo(x + w * 0.50, y + h, x + w * 0.33, y + h - bumpHeight);
+  ctx.quadraticCurveTo(x + w * 0.16, y + h, x,            y + h - bumpHeight);
+  ctx.closePath();
+  ctx.fill();
+  // Eyes — black ovals, slightly offset so the ghost reads as
+  // glancing forward rather than dead-on staring.
+  const eyeRx = w * 0.085;
+  const eyeRy = w * 0.115;
+  const eyeY = y + h * 0.46;
+  ctx.fillStyle = '#0a0a0f';
+  ctx.beginPath();
+  ctx.ellipse(cx - w * 0.20, eyeY, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+  ctx.ellipse(cx + w * 0.20, eyeY, eyeRx, eyeRy, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Round-rect path. Canvas's roundRect is not yet universal so we
+// pave a manual one with arcTo for portability.
+function pathRoundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+// Brand watermark — dark rounded pill in the bottom-right corner
+// containing the ghost mascot + the wordmark "ghost session". Sized
+// relative to the canvas so it reads at the same proportional weight
+// regardless of output resolution.
+function drawWatermark(ctx: CanvasRenderingContext2D): void {
+  const canvasW = ctx.canvas.width;
+  const canvasH = ctx.canvas.height;
+  const iconSize = Math.round(canvasW * 0.06);          // ghost icon size
+  const fontSize = Math.round(canvasW * 0.038);          // wordmark text
+  const padX = Math.round(canvasW * 0.018);
+  const padY = Math.round(canvasW * 0.014);
+  const gap = Math.round(canvasW * 0.012);
+  const margin = Math.round(canvasW * 0.025);
+  const radius = Math.round(canvasW * 0.018);
+
+  const text = 'ghost session';
+  ctx.save();
+  ctx.font = `700 ${fontSize}px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif`;
+  const textWidth = ctx.measureText(text).width;
+
+  const pillW = padX * 2 + iconSize + gap + textWidth;
+  const pillH = padY * 2 + iconSize;
+  const pillX = canvasW - pillW - margin;
+  const pillY = canvasH - pillH - margin;
+
+  // Drop shadow on the pill itself so it lifts off the screen capture
+  // even when the captured area is dark.
+  ctx.shadowColor = 'rgba(0,0,0,0.55)';
+  ctx.shadowBlur = 16;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 6;
+  pathRoundRect(ctx, pillX, pillY, pillW, pillH, radius);
+  ctx.fillStyle = 'rgba(15, 12, 32, 0.92)';
+  ctx.fill();
+  // Subtle hairline border — kills the shadow that would otherwise
+  // bleed through the pill content.
+  ctx.shadowColor = 'transparent';
+  pathRoundRect(ctx, pillX, pillY, pillW, pillH, radius);
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.stroke();
+
+  // Ghost mascot — left side of the pill.
+  drawGhostMascot(ctx, pillX + padX + iconSize / 2, pillY + pillH / 2, iconSize);
+
+  // Wordmark — right side, vertically centered against the icon.
+  ctx.fillStyle = '#ffffff';
+  ctx.textBaseline = 'middle';
+  ctx.textAlign = 'left';
+  ctx.fillText(text, pillX + padX + iconSize + gap, pillY + pillH / 2 + 1);
+  ctx.restore();
+}
+
 function pickMimeType(): string | undefined {
   // Try the most specific MP4 / H.264 codec strings first — modern
   // Chromium (116+) and Safari accept these and we want MP4 output
@@ -162,12 +261,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   // preview panel and the MediaRecorder feed. Stored in a ref so
   // beginRecording() can find it after chooseWindow() finished.
   const canvasStreamRef = useRef<MediaStream | null>(null);
-  // Pre-loaded brand watermark — burned into every frame at the
-  // bottom-right of the canvas so every saved file ships with the
-  // Ghost Session mark baked in (not a separate overlay). Loaded
-  // once on mount and held as a regular Image (not a ref-via-state)
-  // so the compositor RAF doesn't re-render-trigger.
-  const watermarkRef = useRef<HTMLImageElement | null>(null);
 
   // <video> elements feed the canvas compositor. The "preview" video
   // is what the user sees in the overlay before recording starts —
@@ -176,18 +269,6 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
   const screenVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-
-  // Pre-load the watermark once. Doesn't depend on `open` — keep it
-  // hot in case the user repeats record sessions, and the image is
-  // tiny so the cost is negligible.
-  useEffect(() => {
-    if (watermarkRef.current) return;
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.src = '/ghost-watermark.png';
-    img.onload = () => { watermarkRef.current = img; };
-    img.onerror = () => { /* watermark missing — recording still works without it */ };
-  }, []);
 
   // Acquire camera on open. Mic stays off intentionally.
   useEffect(() => {
@@ -368,25 +449,12 @@ export default function RecordVerticalOverlay({ open, onClose }: Props) {
         // worth distorting the app UI.
         drawCover(ctx2d, scrV, 0, SCREEN_TOP, OUTPUT_W, SCREEN_HEIGHT);
       }
-      // Watermark — burned into every frame so the saved file always
-      // carries the Ghost Session mark. Sits in the bottom-right
-      // corner with a soft shadow so it reads against any background.
-      // Sized at 12% of canvas width with a 4% margin off the edges.
-      const wm = watermarkRef.current;
-      if (wm && wm.complete && wm.naturalWidth > 0) {
-        const wmSize = Math.round(OUTPUT_W * 0.12);
-        const margin = Math.round(OUTPUT_W * 0.035);
-        const x = OUTPUT_W - wmSize - margin;
-        const y = OUTPUT_H - wmSize - margin;
-        ctx2d.save();
-        ctx2d.shadowColor = 'rgba(0,0,0,0.55)';
-        ctx2d.shadowBlur = 18;
-        ctx2d.shadowOffsetX = 0;
-        ctx2d.shadowOffsetY = 4;
-        ctx2d.globalAlpha = 0.92;
-        ctx2d.drawImage(wm, x, y, wmSize, wmSize);
-        ctx2d.restore();
-      }
+      // Watermark — drawn programmatically each frame as a dark pill
+      // containing the ghost mascot + "ghost session" wordmark, so the
+      // saved video always ships with the brand mark baked in. No
+      // image-load step, no async race; just pure canvas paths so the
+      // mark is always crisp at 1080×1920.
+      drawWatermark(ctx2d);
       rafIdRef.current = requestAnimationFrame(drawFrame);
     };
     rafIdRef.current = requestAnimationFrame(drawFrame);
