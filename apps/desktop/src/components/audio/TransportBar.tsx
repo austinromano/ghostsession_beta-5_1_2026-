@@ -328,23 +328,21 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
   // see the move without waiting for the debounce.
   useEffect(() => {
     if (!projectId || !tracks) return;
-    const flush = () => {
+    const buildPayload = () => {
       const size = useAudioStore.getState().loadedTracks.size;
       if (size === 0) {
         console.log('[arrangement] flush skipped — no tracks loaded', { projectId });
-        return;
+        return null;
       }
       if (restoredProjectIdRef.current !== projectId) {
         console.log('[arrangement] flush skipped — restore not yet run', { projectId, ref: restoredProjectIdRef.current });
-        return;
+        return null;
       }
-      // Same guard as the debounced save — don't flush a partial blob if
-      // any base track hasn't been loaded into the store yet.
       const loaded = useAudioStore.getState().loadedTracks;
       const fileBacked = tracks.filter((t: any) => t.fileId);
       if (!fileBacked.every((t: any) => loaded.has(t.id))) {
         console.log('[arrangement] flush skipped — base tracks not all in store');
-        return;
+        return null;
       }
       const fileIdMap = new Map<string, string>();
       for (const t of tracks) {
@@ -355,28 +353,55 @@ export default function TransportBar({ tracks, projectId, projectTempo, onTempoC
         const drumRack = getDrumSyncSnapshot();
         const state = drumRack ? { ...baseState, drumRack } : baseState;
         const payload = JSON.stringify(state);
-        if (payload === lastSentServerRef.current) {
-          console.log('[arrangement] flush skip — state unchanged', { projectId });
-          return;
-        }
-        useAudioStore.getState().saveArrangementState(projectId, fileIdMap);
-        lastSentServerRef.current = payload;
-        const offsets = state.clips.map((c: any) => `${c.trackId.slice(0, 6)}@${c.startOffset.toFixed(2)}`);
-        console.log('[arrangement] flush POST', { projectId, clips: state.clips.length, drumClips: drumRack?.clips.length ?? 0, offsets });
-        api.saveArrangement(projectId, state).then(() => {
-          console.log('[arrangement] flush POST ok', { projectId });
-        }).catch((err) => {
-          console.error('[arrangement] flush POST FAILED', err);
-        });
-      } catch (err) { console.error('[arrangement] flush build failed', err); }
+        return { state, payload, fileIdMap, drumRack };
+      } catch (err) {
+        console.error('[arrangement] flush build failed', err);
+        return null;
+      }
     };
+
+    const flush = () => {
+      const built = buildPayload();
+      if (!built) return;
+      if (built.payload === lastSentServerRef.current) {
+        console.log('[arrangement] flush skip — state unchanged', { projectId });
+        return;
+      }
+      useAudioStore.getState().saveArrangementState(projectId, built.fileIdMap);
+      lastSentServerRef.current = built.payload;
+      const offsets = built.state.clips.map((c: any) => `${c.trackId.slice(0, 6)}@${c.startOffset.toFixed(2)}`);
+      console.log('[arrangement] flush POST', { projectId, clips: built.state.clips.length, drumClips: built.drumRack?.clips.length ?? 0, offsets });
+      api.saveArrangement(projectId, built.state).then(() => {
+        console.log('[arrangement] flush POST ok', { projectId });
+      }).catch((err) => {
+        console.error('[arrangement] flush POST FAILED', err);
+      });
+    };
+
+    // pagehide / beforeunload fire as the page is going away. A normal
+    // fetch() can be aborted before it reaches the server — which was
+    // the root cause of pitch / mix changes failing to persist on a
+    // quick refresh. Use the keepalive variant here so the browser
+    // is required to deliver the request before it lets the page
+    // close.
+    const flushOnUnload = () => {
+      const built = buildPayload();
+      if (!built) return;
+      // Always write localStorage synchronously — restore reads it
+      // back if the server save somehow misses.
+      useAudioStore.getState().saveArrangementState(projectId, built.fileIdMap);
+      if (built.payload === lastSentServerRef.current) return;
+      lastSentServerRef.current = built.payload;
+      api.saveArrangementKeepalive(projectId, built.state);
+    };
+
     window.addEventListener('ghost-save-arrangement', flush);
-    window.addEventListener('pagehide', flush);
-    window.addEventListener('beforeunload', flush);
+    window.addEventListener('pagehide', flushOnUnload);
+    window.addEventListener('beforeunload', flushOnUnload);
     return () => {
       window.removeEventListener('ghost-save-arrangement', flush);
-      window.removeEventListener('pagehide', flush);
-      window.removeEventListener('beforeunload', flush);
+      window.removeEventListener('pagehide', flushOnUnload);
+      window.removeEventListener('beforeunload', flushOnUnload);
     };
   }, [projectId, tracks]);
 

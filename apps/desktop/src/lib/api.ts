@@ -224,6 +224,29 @@ export const api = {
   saveArrangement: (projectId: string, state: { clips: any[] }) =>
     request<void>('PUT', `/projects/${projectId}/arrangement`, state),
 
+  // Same endpoint, but flagged with `keepalive: true` so the browser
+  // is required to complete the request even if the page is unloading.
+  // Use this from pagehide / beforeunload handlers — a normal fetch()
+  // can be aborted before the request reaches the server, which was
+  // the root cause of recent pitch / mix changes failing to persist
+  // on quick refreshes. keepalive bodies are capped at 64 KB by spec
+  // so the caller is responsible for keeping the payload small (the
+  // arrangement blob is well under that ceiling in practice).
+  saveArrangementKeepalive: (projectId: string, state: { clips: any[] }) => {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+    try {
+      return fetch(`${BASE_URL}/projects/${projectId}/arrangement`, {
+        method: 'PUT',
+        headers,
+        body: JSON.stringify(state),
+        keepalive: true,
+      });
+    } catch {
+      return Promise.resolve();
+    }
+  },
+
   // Bookings — scheduled co-working sessions with friends
   listBookings: () => request<Booking[]>('GET', '/bookings'),
   createBooking: (data: { inviteeId: string; title?: string; scheduledAt: string; durationMin: number }) =>
